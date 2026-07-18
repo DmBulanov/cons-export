@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="ru">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Cons Export</title>
+    <link rel="stylesheet" href="popup.css" />
+  </head>
+  <body>
+    <header class="header">
+      <div class="brand">Cons Export</div>
+      <div id="pageMeta" class="meta">Найдите практику и сохраните документы</div>
+    </header>
+
+    <section class="block search-block">
+      <label class="label" for="query">Какую практику найти?</label>
+      <textarea
+        id="query"
+        rows="3"
+        placeholder="Например: взыскание задолженности по аренде нежилого помещения арбитраж"
+      ></textarea>
+      <label class="label scope-label" for="scope">Область</label>
+      <select id="scope">
+        <option value="practice">Судебная практика</option>
+        <option value="all">Всё по запросу</option>
+      </select>
+      <div class="search-actions">
+        <button id="btnFind" class="btn primary" type="button">Найти</button>
+        <button id="btnFindSave" class="btn accent" type="button">
+          Найти и сохранить
+        </button>
+      </div>
+    </section>
+
+    <section class="block">
+      <label class="label" for="format">Формат сохранения</label>
+      <select id="format">
+        <option value="docx" selected>DOCX — Word (по умолчанию)</option>
+        <option value="pdf">PDF</option>
+        <option value="rtf">RTF</option>
+        <option value="txt">Текст (.txt) — быстрее, без окон КП</option>
+        <option value="html">HTML (.html) — быстрее, без окон КП</option>
+      </select>
+      <label class="label scope-label" for="downloadFolder">Папка внутри «Загрузки»</label>
+      <input
+        id="downloadFolder"
+        type="text"
+        value="ConsExport"
+        placeholder="ConsExport"
+      />
+      <p class="hint folder-hint" id="folderHint">
+        Файлы TXT/HTML: Загрузки/<span id="folderPreview">ConsExport</span>/…
+        Без окон — один раз выключите в Chrome «Всегда указывать место для скачивания».
+        <button id="btnOpenDownloadsSettings" class="linkish" type="button">
+          Открыть настройки загрузок
+        </button>
+      </p>
+    </section>
+
+    <section class="block stats" id="stats">
+      <div>Адаптер: <strong id="adapterName">—</strong></div>
+      <div>Страница: <strong id="pageType">—</strong></div>
+      <div>В списке: <strong id="listCount">—</strong></div>
+    </section>
+
+    <section class="actions">
+      <button id="btnScan" class="btn secondary" type="button">Сканировать список</button>
+      <button id="btnExport" class="btn secondary" type="button" disabled>
+        Экспорт текущего списка
+      </button>
+      <button id="btnOne" class="btn secondary" type="button">
+        Сохранить текущий
+      </button>
+      <button id="btnStop" class="btn danger" type="button" hidden>Стоп</button>
+    </section>
+
+    <section class="block">
+      <div class="label">Прогресс</div>
+      <div id="progressText" class="progress">ожидание</div>
+      <pre id="log" class="log"></pre>
+    </section>
+
+    <section class="block online-tools">
+      <p class="hint">
+        Нужна открытая сессия online.consultant.ru (вы уже вошли). После обновления
+        расширения нажмите «Обновить» на chrome://extensions.
+      </p>
+      <button id="btnProbe" class="btn secondary" type="button">Разведка UI</button>
+    </section>
+
+    <script src="popup.js"></script>
+  </body>
+</html>

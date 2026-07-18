@@ -1,0 +1,27 @@
+# Cons Export
+
+Chrome extension / Cons Export project files.
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Local / secrets
+.env
+*.pem
+
+# Logs & caches
+logs/
+*.log
+.pytest_cache/
+__pycache__/
+node_modules/
+
+# Personal downloads accidentally copied here
+ConsExport/
+export_*.csv

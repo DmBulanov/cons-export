@@ -1,0 +1,49 @@
+{
+  "manifest_version": 3,
+  "name": "Cons Export — КонсультантПлюс",
+  "version": "0.4.0",
+  "description": "Поиск и массовое сохранение документов из браузерной версии КонсультантПлюс.",
+  "permissions": [
+    "activeTab",
+    "downloads",
+    "scripting",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "https://*.consultant.ru/*",
+    "http://*.consultant.ru/*"
+  ],
+  "action": {
+    "default_title": "Cons Export",
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background/service-worker.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.consultant.ru/*",
+        "http://*.consultant.ru/*"
+      ],
+      "js": [
+        "shared/filename.js",
+        "content/adapters/public-site.js",
+        "content/adapters/online-app.js",
+        "content/content.js"
+      ],
+      "run_at": "document_idle"
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}
