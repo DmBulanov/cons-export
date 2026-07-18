@@ -26,8 +26,6 @@
   const NATIVE_FORMATS = new Set(Object.keys(FORMAT_MATCH));
 
   const SEARCH_SCOPES = Object.freeze(["all", "practice"]);
-  const SEARCH_MIN_RENDER_MS = 1200;
-  const SEARCH_SETTLE_MS = 1000;
 
   function isConsultantHost(hostname) {
     const host = String(hostname || "").toLowerCase();
@@ -49,7 +47,13 @@
   }
 
   function resultSignature(items) {
-    return (items || []).map((item) => `${item.url}\n${item.title}`).join("\n---\n");
+    const source = (items || []).map((item) => `${item.url}\n${item.title}`).join("\n---\n");
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
   }
 
   function isPresetActive(element) {
@@ -68,57 +72,6 @@
       .filter(Boolean)
       .join(" ");
     return /(?:^|[-_\s])(active|checked|current|selected)(?:$|[-_\s])/i.test(marker);
-  }
-
-  function waitForCondition(check, options = {}) {
-    const timeoutMs = options.timeoutMs || 20000;
-    const root = options.root || document.documentElement || document.body;
-
-    return new Promise((resolve) => {
-      let settled = false;
-      let observer = null;
-
-      const finish = (value) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
-        clearInterval(interval);
-        observer?.disconnect();
-        resolve(value);
-      };
-
-      const evaluate = () => {
-        if (settled) return;
-        try {
-          const value = check();
-          if (value) finish(value);
-        } catch {
-          // The SPA may replace nodes between a mutation and this check.
-        }
-      };
-
-      const interval = setInterval(evaluate, 200);
-      const timeout = setTimeout(() => finish(null), timeoutMs);
-
-      if (root && typeof MutationObserver !== "undefined") {
-        observer = new MutationObserver((records) => {
-          options.onMutation?.(records);
-          evaluate();
-        });
-        try {
-          observer.observe(root, {
-            subtree: true,
-            childList: true,
-            attributes: true,
-            characterData: true,
-          });
-        } catch {
-          observer = null;
-        }
-      }
-
-      evaluate();
-    });
   }
 
   function escapeHtml(s) {
@@ -241,6 +194,75 @@
       return items;
     },
 
+    currentSearchQuery() {
+      const inputValue = normalizedText(this._findSearchInput()?.value);
+      if (inputValue) return inputValue;
+      return this._urlSearchQuery();
+    },
+
+    _urlSearchQuery() {
+      try {
+        return normalizedText(new URL(location.href).searchParams.get("splusFind"));
+      } catch {
+        return "";
+      }
+    },
+
+    _activeSearchScope() {
+      const practice = this._findScopePreset(/судебная практика/i);
+      if (isPresetActive(practice)) return "practice";
+      const all = this._findScopePreset(
+        /^(?:все|все документы|все материалы|все результаты|все по запросу)$/i
+      );
+      return isPresetActive(all) ? "all" : null;
+    },
+
+    getSearchState(expectedQuery = "") {
+      const items = this.collectListItems();
+      const loading = this._isResultsLoading();
+      const emptyResults = this._hasEmptyResultsMessage();
+      const query = normalizedText(expectedQuery);
+      const urlQuery = this._urlSearchQuery();
+      return {
+        queryMatches: Boolean(query) && this.currentSearchQuery() === query,
+        queryAuthoritative: Boolean(query) && urlQuery === query,
+        activeScope: this._activeSearchScope(),
+        loading,
+        emptyResults,
+        resultsReady: !loading && (items.length > 0 || emptyResults),
+        resultCount: items.length,
+        resultSignature: resultSignature(items),
+        items,
+      };
+    },
+
+    triggerSearchScope(scope) {
+      if (!SEARCH_SCOPES.includes(scope)) {
+        throw adapterError("UNSUPPORTED_SCOPE", `Неизвестная область поиска: ${scope}`);
+      }
+      const state = this.getSearchState();
+      if (state.activeScope === scope) {
+        return { triggered: false, scopeApplied: true, beforeSignature: state.resultSignature };
+      }
+      const preset = this._findScopePreset(
+        scope === "practice"
+          ? /судебная практика/i
+          : /^(?:все|все документы|все материалы|все результаты|все по запросу)$/i
+      );
+      if (!preset) {
+        throw adapterError("SCOPE_NOT_FOUND", `Переключатель области «${scope}» не найден`);
+      }
+      setTimeout(() => {
+        if (preset.isConnected !== false) preset.click();
+      }, 0);
+      return {
+        triggered: true,
+        scopeApplied: false,
+        navigationExpected: true,
+        beforeSignature: state.resultSignature,
+      };
+    },
+
     /**
      * Run quick search for a query, optionally filter to judicial practice.
      * @param {string} query
@@ -265,107 +287,31 @@
         );
       }
 
-      const input = this._findSearchInput();
-
-      if (input) {
-        const beforeItems = this.collectListItems();
-        const beforeSignature = resultSignature(beforeItems);
-        const sameQuery =
-          normalizedText(input.value) === q &&
-          (beforeItems.length > 0 || this._hasEmptyResultsMessage());
-        const resultReady = sameQuery
-          ? null
-          : this._waitForSearchUpdate(beforeSignature);
-
-        input.focus();
-        const setter = Object.getOwnPropertyDescriptor(
-          HTMLInputElement.prototype,
-          "value"
-        )?.set;
-        if (setter) setter.call(input, q);
-        else input.value = q;
-        input.dispatchEvent(new Event("input", { bubbles: true }));
-        input.dispatchEvent(new Event("change", { bubbles: true }));
-
-        if (!sameQuery) {
-          const btn = this._findSearchButton(input);
-          if (btn) btn.click();
-          else {
-            input.dispatchEvent(
-              new KeyboardEvent("keydown", {
-                key: "Enter",
-                code: "Enter",
-                keyCode: 13,
-                bubbles: true,
-              })
-            );
-          }
-          await resultReady;
-        }
-      } else {
-        // URL navigation cannot safely apply a SPA preset after this document unloads.
-        if (scope !== "all") {
-          throw adapterError(
-            "SEARCH_INPUT_NOT_FOUND",
-            "Поле поиска не найдено; фильтр «Судебная практика» нельзя применить надёжно"
-          );
-        }
-
-        const current = new URL(location.href);
-        if (
-          current.searchParams.get("splusFind")?.trim() === q &&
-          /page=splus/i.test(location.href)
-        ) {
-          const items = this.collectListItems();
-          return {
-            query: q,
-            scope: "all",
-            scopeApplied: true,
-            count: items.length,
-            items,
-            url: location.href,
-          };
-        }
-
-        const rnd = current.searchParams.get("rnd") || "";
-        const pathname = /online\.cgi/i.test(current.pathname)
-          ? current.pathname
-          : "/riv/cgi/online.cgi";
-        const url =
-          `${location.origin}${pathname}?req=card&page=splus&splusFind=` +
-          `${encodeURIComponent(q)}${rnd ? `&rnd=${encodeURIComponent(rnd)}` : ""}#splus`;
-        location.assign(url);
+      const state = this.getSearchState(q);
+      if (
+        state.queryMatches &&
+        state.queryAuthoritative &&
+        state.activeScope === scope &&
+        state.resultsReady
+      ) {
         return {
           query: q,
-          scope: "all",
+          scope,
           scopeApplied: true,
-          navigating: true,
-          count: 0,
-          items: [],
-          url,
+          count: state.items.length,
+          items: state.items,
+          url: location.href,
         };
       }
 
-      if (scope === "practice") {
-        const applied = await this._clickScopePreset(/судебная практика/i);
-        if (!applied) {
-          throw adapterError(
-            "SCOPE_NOT_APPLIED",
-            "Не удалось подтвердить фильтр «Судебная практика»"
-          );
-        }
-      } else {
-        await this._ensureAllScope();
-      }
-
-      const items = this.collectListItems();
       return {
         query: q,
         scope,
-        scopeApplied: true,
-        count: items.length,
-        items,
-        url: location.href,
+        scopeApplied: false,
+        navigating: true,
+        count: 0,
+        items: [],
+        url: consBuildOnlineSearchUrl(location.href, q),
       };
     },
 
@@ -396,163 +342,10 @@
       return true;
     },
 
-    async _waitForSearchUpdate(beforeSignature) {
-      let sawResultMutation = false;
-      let firstResultChangeAt = 0;
-      let lastResultChangeAt = 0;
-      let observedSignature = beforeSignature;
-      let sawLoading = this._isResultsLoading();
-      let loadingCompleted = false;
-      const root = this._resultsRoot();
-      const noteResultChange = () => {
-        const now = Date.now();
-        sawResultMutation = true;
-        firstResultChangeAt ||= now;
-        lastResultChangeAt = now;
-      };
-      const result = await waitForCondition(
-        () => {
-          const items = this.collectListItems();
-          const signature = resultSignature(items);
-          const emptyResults = this._hasEmptyResultsMessage();
-          const loading = this._isResultsLoading();
-          if (loading) sawLoading = true;
-          else if (sawLoading) loadingCompleted = true;
-          if (signature !== observedSignature) {
-            observedSignature = signature;
-            noteResultChange();
-          }
-          const hasUpdateEvidence =
-            signature !== beforeSignature ||
-            loadingCompleted;
-          const now = Date.now();
-          const settled =
-            firstResultChangeAt > 0 &&
-            now - firstResultChangeAt >= SEARCH_MIN_RENDER_MS &&
-            now - lastResultChangeAt >= SEARCH_SETTLE_MS;
-
-          if (
-            hasUpdateEvidence &&
-            settled &&
-            !loading &&
-            (items.length > 0 || emptyResults)
-          ) {
-            return { items };
-          }
-          return null;
-        },
-        {
-          root,
-          timeoutMs: 20000,
-          onMutation() {
-            noteResultChange();
-          },
-        }
-      );
-
-      if (!result) {
-        throw adapterError(
-          "SEARCH_TIMEOUT",
-          "Не удалось подтвердить обновление поисковой выдачи"
-        );
-      }
-      return result.items;
-    },
-
     _findScopePreset(labelRe) {
       return [...document.querySelectorAll(
         ".x-page-search-plus-presets__preset, [class*='presets__preset'], a, button, [role=tab]"
       )].find((element) => labelRe.test(normalizedText(element.innerText || element.textContent)));
-    },
-
-    async _clickScopePreset(labelRe) {
-      const preset = this._findScopePreset(labelRe);
-      if (!preset) return false;
-      if (isPresetActive(preset)) return true;
-
-      const beforeSignature = resultSignature(this.collectListItems());
-      const resultsRoot = this._resultsRoot();
-      let sawResultMutation = false;
-      let firstResultChangeAt = 0;
-      let lastResultChangeAt = 0;
-      let observedSignature = beforeSignature;
-      let sawLoading = this._isResultsLoading();
-      let loadingCompleted = false;
-      const noteResultChange = () => {
-        const now = Date.now();
-        sawResultMutation = true;
-        firstResultChangeAt ||= now;
-        lastResultChangeAt = now;
-      };
-      const applied = waitForCondition(
-        () => {
-          const currentPreset = this._findScopePreset(labelRe);
-          if (!isPresetActive(currentPreset)) return null;
-
-          const items = this.collectListItems();
-          const signature = resultSignature(items);
-          const loading = this._isResultsLoading();
-          if (loading) sawLoading = true;
-          else if (sawLoading) loadingCompleted = true;
-          if (signature !== observedSignature) {
-            observedSignature = signature;
-            noteResultChange();
-          }
-          const signatureChanged = signature !== beforeSignature;
-          const emptyResults = this._hasEmptyResultsMessage();
-          const hasUpdateEvidence =
-            signatureChanged ||
-            loadingCompleted;
-          const now = Date.now();
-          const renderSettled =
-            firstResultChangeAt > 0 &&
-            now - firstResultChangeAt >= SEARCH_MIN_RENDER_MS &&
-            now - lastResultChangeAt >= SEARCH_SETTLE_MS;
-          return (
-            hasUpdateEvidence &&
-            renderSettled &&
-            !loading &&
-            (items.length > 0 || emptyResults)
-          );
-        },
-        {
-          root: document.documentElement || document.body,
-          timeoutMs: 8000,
-          onMutation(records) {
-            const resultChanged = records.some((record) => {
-              const target = record.target;
-              const presetOnly =
-                target === preset ||
-                (typeof preset.contains === "function" && preset.contains(target));
-              if (presetOnly) return false;
-              return (
-                target === resultsRoot ||
-                (typeof resultsRoot?.contains === "function" && resultsRoot.contains(target)) ||
-                resultsRoot === document.body
-              );
-            });
-            if (resultChanged) noteResultChange();
-          },
-        }
-      );
-      preset.click();
-      return Boolean(await applied);
-    },
-
-    async _ensureAllScope() {
-      const practice = this._findScopePreset(/судебная практика/i);
-      if (!practice || !isPresetActive(practice)) return true;
-
-      const applied = await this._clickScopePreset(
-        /^(?:все|все документы|все материалы|все результаты|все по запросу)$/i
-      );
-      if (!applied) {
-        throw adapterError(
-          "SCOPE_NOT_APPLIED",
-          "Не удалось снять фильтр «Судебная практика»"
-        );
-      }
-      return true;
     },
 
     _docTitle() {

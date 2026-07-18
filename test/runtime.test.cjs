@@ -3,14 +3,87 @@ const test = require("node:test");
 
 const {
   consAssertFormatSupported,
+  consBuildOnlineSearchUrl,
+  consBuildPublicSearchUrl,
+  consBuildSafeDiagnosticsSnapshot,
   consIsConsultantHost,
   consIsConsultantPageUrl,
   consMatchesNativeDownload,
+  consNativeDownloadDecision,
   consNormalizeDocumentUrl,
   consProvenanceUrl,
   consRedactUrl,
   consSanitizeFolder,
 } = require("../extension/shared/runtime.js");
+
+test("copied diagnostics contain only allowlisted structural fields and closed events", () => {
+  const snapshot = consBuildSafeDiagnosticsSnapshot(
+    {
+      hostname: "online.consultant.ru",
+      page: "document",
+      listCount: 1,
+      url: "https://example.test/SECRET_URL",
+      title: "SECRET_TITLE",
+      query: "SECRET_QUERY",
+      documentText: "SECRET_DOCUMENT",
+    },
+    [
+      {
+        at: "2026-07-18T10:00:00.000Z",
+        code: "NM_REFERRER",
+        countBucket: "1",
+        filename: "SECRET_FILENAME.pdf",
+      },
+      {
+        at: "2026-07-18T10:00:01.000Z",
+        code: "RAW_SECRET_CODE",
+        countBucket: "many",
+      },
+    ]
+  );
+
+  assert.deepEqual(snapshot, {
+    page: {
+      hostname: "online.consultant.ru",
+      page: "document",
+      listCount: 1,
+    },
+    downloads: [
+      {
+        at: "2026-07-18T10:00:00.000Z",
+        code: "NM_REFERRER",
+        countBucket: "1",
+      },
+    ],
+  });
+  assert.doesNotMatch(JSON.stringify(snapshot), /SECRET_/);
+});
+
+test("search URLs are built by the shared allowlist without stale session parameters", () => {
+  const online = new URL(
+    consBuildOnlineSearchUrl(
+      "https://online.consultant.ru/riv/cgi/online.cgi?req=home&rnd=session&ts=old#old",
+      "срок аренды"
+    )
+  );
+  assert.equal(online.origin, "https://online.consultant.ru");
+  assert.equal(online.pathname, "/riv/cgi/online.cgi");
+  assert.equal(online.searchParams.get("req"), "card");
+  assert.equal(online.searchParams.get("page"), "splus");
+  assert.equal(online.searchParams.get("splusFind"), "срок аренды");
+  assert.equal(online.searchParams.get("rnd"), "session");
+  assert.equal(online.searchParams.has("ts"), false);
+  assert.equal(online.hash, "#splus");
+
+  assert.equal(
+    consBuildPublicSearchUrl("аренда + неустойка"),
+    "https://www.consultant.ru/search/?q=%D0%B0%D1%80%D0%B5%D0%BD%D0%B4%D0%B0+%2B+%D0%BD%D0%B5%D1%83%D1%81%D1%82%D0%BE%D0%B9%D0%BA%D0%B0"
+  );
+  assert.throws(
+    () => consBuildOnlineSearchUrl("https://evil.example/", "test"),
+    /КонсультантПлюс/
+  );
+});
 
 test("Consultant host checks enforce an HTTPS hostname boundary", () => {
   assert.equal(consIsConsultantHost("consultant.ru"), true);
@@ -164,4 +237,107 @@ test("native download matching rejects unrelated time, format, host, and documen
     ),
     false
   );
+
+  assert.deepEqual(consNativeDownloadDecision(candidate, current), {
+    match: true,
+    candidate: true,
+    code: "NM_OK",
+  });
+  assert.deepEqual(
+    consNativeDownloadDecision({ ...candidate, referrer: "" }, current),
+    { match: false, candidate: true, code: "NM_REFERRER" }
+  );
+  assert.deepEqual(
+    consNativeDownloadDecision(
+      {
+        ...candidate,
+        referrer: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW&n=99",
+      },
+      current
+    ),
+    { match: false, candidate: true, code: "NM_ID_MISMATCH" }
+  );
+  assert.equal(
+    consNativeDownloadDecision(
+      { ...candidate, filename: "/Downloads/unrelated.txt" },
+      current
+    ).candidate,
+    false
+  );
+});
+
+test("native matcher exposes a closed reason table and preserves boolean parity", () => {
+  const current = {
+    downloadKind: "native",
+    downloadStartedAt: Date.parse("2026-07-18T10:00:00.000Z"),
+    expectedFilename: "SECRET_TITLE.pdf",
+    sourceUrl:
+      "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW&n=42&token=SECRET_URL",
+    extensionId: "our-extension",
+  };
+  const candidate = {
+    startTime: "2026-07-18T10:00:01.000Z",
+    filename: "/SECRET_PATH/document.pdf",
+    url: "https://online.consultant.ru/download/SECRET_DOWNLOAD",
+    referrer:
+      "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW&n=42",
+    byExtensionId: "our-extension",
+  };
+  const cases = [
+    ["NM_CONTEXT", candidate, { ...current, downloadKind: "direct" }],
+    ["NM_TIME", { ...candidate, startTime: "2026-07-18T10:01:00.000Z" }, current],
+    [
+      "NM_ORIGIN",
+      { ...candidate, url: "https://evil.example/file", referrer: "https://evil.example/doc" },
+      current,
+    ],
+    ["NM_EXTENSION", { ...candidate, filename: "/Downloads/document.txt" }, current],
+    ["NM_REFERRER", { ...candidate, referrer: "" }, current],
+    ["NM_URL", candidate, { ...current, sourceUrl: "" }],
+    [
+      "NM_DOCUMENT",
+      {
+        ...candidate,
+        referrer: "https://online.consultant.ru/search/?base=LAW&n=42",
+      },
+      current,
+    ],
+    [
+      "NM_BASE",
+      {
+        ...candidate,
+        referrer: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=KAD&n=42",
+      },
+      current,
+    ],
+    [
+      "NM_ID_MISSING",
+      {
+        ...candidate,
+        referrer: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW",
+      },
+      {
+        ...current,
+        sourceUrl: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW",
+      },
+    ],
+    [
+      "NM_ID_MISMATCH",
+      {
+        ...candidate,
+        referrer: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW&n=99",
+      },
+      current,
+    ],
+    ["NM_OWNER", { ...candidate, byExtensionId: "other-extension" }, current],
+    ["NM_OK", candidate, current],
+  ];
+
+  for (const [expectedCode, item, expected] of cases) {
+    const decision = consNativeDownloadDecision(item, expected);
+    assert.equal(decision.code, expectedCode);
+    assert.equal(consMatchesNativeDownload(item, expected), decision.match);
+    assert.deepEqual(Object.keys(decision).sort(), ["candidate", "code", "match"]);
+    assert.doesNotMatch(JSON.stringify(decision), /SECRET_/);
+  }
 });

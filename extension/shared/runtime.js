@@ -1,5 +1,43 @@
 /** Shared runtime contracts for popup, content scripts, and the service worker. */
 (function () {
+  const CONS_DOWNLOAD_DIAGNOSTIC_CODES = Object.freeze([
+    "NM_CONTEXT",
+    "NM_TIME",
+    "NM_ORIGIN",
+    "NM_EXTENSION",
+    "NM_REFERRER",
+    "NM_URL",
+    "NM_DOCUMENT",
+    "NM_BASE",
+    "NM_ID_MISSING",
+    "NM_ID_MISMATCH",
+    "NM_OWNER",
+    "NM_TIMEOUT",
+    "NM_AMBIGUOUS",
+    "NM_ATTACHED",
+    "NM_RECOVERED",
+    "DG_ARMED",
+    "DG_PENDING",
+    "DG_CANCEL_EXISTING",
+    "DG_CANCEL_LATE",
+    "DG_ALREADY_TERMINAL",
+    "DG_CANCEL_FAILED",
+    "DG_SCAN_FAILED",
+    "DG_EXPIRED",
+  ]);
+  const DOWNLOAD_DIAGNOSTIC_CODE_SET = new Set(CONS_DOWNLOAD_DIAGNOSTIC_CODES);
+  const SAFE_PROBE_KEYS = Object.freeze([
+    "hostname",
+    "page",
+    "listCount",
+    "hasFullTextButton",
+    "hasWord",
+    "hasDots",
+    "hasNext",
+    "hasDocPane",
+    "docTextLen",
+  ]);
+
   const CONS_FORMATS = Object.freeze(["docx", "pdf", "rtf", "txt", "html"]);
   const CONS_ADAPTER_CAPABILITIES = Object.freeze({
     "online-app": Object.freeze({
@@ -28,6 +66,52 @@
     } catch {
       return false;
     }
+  }
+
+  function normalizedSearchQuery(query) {
+    const value = String(query || "").trim();
+    if (!value) throw new Error("Пустой поисковый запрос");
+    if (value.length > 2000) throw new Error("Поисковый запрос превышает 2000 символов");
+    return value;
+  }
+
+  function consBuildOnlineSearchUrl(currentUrl, query) {
+    const value = normalizedSearchQuery(query);
+    let current;
+    try {
+      current = new URL(currentUrl);
+    } catch {
+      throw new Error("Некорректный URL КонсультантПлюс");
+    }
+    if (
+      current.protocol !== "https:" ||
+      !consIsConsultantHost(current.hostname) ||
+      current.hostname === "consultant.ru" ||
+      current.hostname === "www.consultant.ru" ||
+      current.hostname === "login.consultant.ru" ||
+      current.username ||
+      current.password
+    ) {
+      throw new Error("Требуется HTTPS-страница онлайн-КонсультантПлюс");
+    }
+
+    const pathname = /online\.cgi$/i.test(current.pathname)
+      ? current.pathname
+      : "/riv/cgi/online.cgi";
+    const result = new URL(pathname, current.origin);
+    result.searchParams.set("req", "card");
+    result.searchParams.set("page", "splus");
+    result.searchParams.set("splusFind", value);
+    const rnd = current.searchParams.get("rnd");
+    if (rnd) result.searchParams.set("rnd", rnd.slice(0, 200));
+    result.hash = "splus";
+    return result.href;
+  }
+
+  function consBuildPublicSearchUrl(query) {
+    const result = new URL("https://www.consultant.ru/search/");
+    result.searchParams.set("q", normalizedSearchQuery(query));
+    return result.href;
   }
 
   function consNormalizeDocumentUrl(rawUrl, adapterId) {
@@ -128,8 +212,14 @@
 
   const consRedactUrl = consProvenanceUrl;
 
-  function consMatchesNativeDownload(item, current) {
-    if (!item || current?.downloadKind !== "native") return false;
+  function nativeDecision(match, candidate, code) {
+    return { match, candidate, code };
+  }
+
+  function consNativeDownloadDecision(item, current) {
+    if (!item || current?.downloadKind !== "native") {
+      return nativeDecision(false, false, "NM_CONTEXT");
+    }
 
     const startedAt = Date.parse(item.startTime || "");
     const triggerAt = Number(current.downloadStartedAt || 0);
@@ -139,7 +229,7 @@
       startedAt < triggerAt - 2000 ||
       startedAt > triggerAt + 30000
     ) {
-      return false;
+      return nativeDecision(false, false, "NM_TIME");
     }
 
     const consultantOrigin = [item.url, item.finalUrl, item.referrer].some((candidate) => {
@@ -151,7 +241,7 @@
         return false;
       }
     });
-    if (!consultantOrigin) return false;
+    if (!consultantOrigin) return nativeDecision(false, false, "NM_ORIGIN");
 
     const expectedExtension = String(current.expectedFilename || "")
       .toLowerCase()
@@ -159,9 +249,12 @@
     const actualExtension = String(item.filename || "")
       .toLowerCase()
       .match(/\.([a-z0-9]+)$/)?.[1];
-    if (!expectedExtension || actualExtension !== expectedExtension) return false;
+    if (!expectedExtension || actualExtension !== expectedExtension) {
+      return nativeDecision(false, false, "NM_EXTENSION");
+    }
 
-    if (!item.referrer || !current.sourceUrl) return false;
+    if (!item.referrer) return nativeDecision(false, true, "NM_REFERRER");
+    if (!current.sourceUrl) return nativeDecision(false, true, "NM_URL");
     try {
       const referrer = new URL(item.referrer);
       const source = new URL(current.sourceUrl);
@@ -171,7 +264,7 @@
         !consIsConsultantHost(referrer.hostname) ||
         !consIsConsultantHost(source.hostname)
       ) {
-        return false;
+        return nativeDecision(false, true, "NM_URL");
       }
 
       const referrerIsDocument =
@@ -180,45 +273,95 @@
       const sourceIsDocument =
         source.searchParams.get("req")?.toLowerCase() === "doc" ||
         source.pathname.startsWith("/document/");
-      if (!referrerIsDocument || !sourceIsDocument) return false;
+      if (!referrerIsDocument || !sourceIsDocument) {
+        return nativeDecision(false, true, "NM_DOCUMENT");
+      }
 
       const sourceBase = source.searchParams.get("base");
-      if (sourceBase && referrer.searchParams.get("base") !== sourceBase) return false;
+      if (sourceBase && referrer.searchParams.get("base") !== sourceBase) {
+        return nativeDecision(false, true, "NM_BASE");
+      }
 
       let strongIdentifiers = 0;
       for (const key of ["n", "doc", "id"]) {
         const sourceValue = source.searchParams.get(key);
         if (!sourceValue) continue;
         const refValue = referrer.searchParams.get(key);
-        if (!refValue || refValue !== sourceValue) return false;
+        if (!refValue || refValue !== sourceValue) {
+          return nativeDecision(false, true, "NM_ID_MISMATCH");
+        }
         strongIdentifiers += 1;
       }
-      if (strongIdentifiers === 0) return false;
+      if (strongIdentifiers === 0) {
+        return nativeDecision(false, true, "NM_ID_MISSING");
+      }
       if (
         current.extensionId &&
         item.byExtensionId &&
         item.byExtensionId !== current.extensionId
       ) {
-        return false;
+        return nativeDecision(false, true, "NM_OWNER");
       }
     } catch {
-      return false;
+      return nativeDecision(false, true, "NM_URL");
     }
 
-    return true;
+    return nativeDecision(true, true, "NM_OK");
+  }
+
+  function consMatchesNativeDownload(item, current) {
+    return consNativeDownloadDecision(item, current).match;
+  }
+
+  function consSanitizeDownloadDiagnostics(events) {
+    return (Array.isArray(events) ? events : [])
+      .filter(
+        (event) =>
+          event &&
+          DOWNLOAD_DIAGNOSTIC_CODE_SET.has(event.code) &&
+          ["0", "1", "many"].includes(event.countBucket) &&
+          Number.isFinite(Date.parse(event.at || ""))
+      )
+      .slice(-32)
+      .map((event) => ({
+        at: new Date(event.at).toISOString(),
+        code: event.code,
+        countBucket: event.countBucket,
+      }));
+  }
+
+  function consSanitizePageProbe(probe) {
+    const source = probe && typeof probe === "object" ? probe : {};
+    return Object.fromEntries(
+      SAFE_PROBE_KEYS.filter((key) => key in source).map((key) => [key, source[key]])
+    );
+  }
+
+  function consBuildSafeDiagnosticsSnapshot(probe, events) {
+    return {
+      page: consSanitizePageProbe(probe),
+      downloads: consSanitizeDownloadDiagnostics(events),
+    };
   }
 
   const api = {
+    CONS_DOWNLOAD_DIAGNOSTIC_CODES,
     CONS_ADAPTER_CAPABILITIES,
     CONS_FORMATS,
     consAssertFormatSupported,
+    consBuildOnlineSearchUrl,
+    consBuildPublicSearchUrl,
     consGetAdapterCapabilities,
     consIsConsultantHost,
     consIsConsultantPageUrl,
     consMatchesNativeDownload,
+    consNativeDownloadDecision,
     consNormalizeDocumentUrl,
     consProvenanceUrl,
     consRedactUrl,
+    consBuildSafeDiagnosticsSnapshot,
+    consSanitizeDownloadDiagnostics,
+    consSanitizePageProbe,
     consSanitizeFolder,
   };
   Object.assign(globalThis, api);

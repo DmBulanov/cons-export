@@ -3,6 +3,7 @@
 importScripts("../shared/filename.js");
 importScripts("../shared/runtime.js");
 importScripts("export-job.js");
+importScripts("search-flow.js");
 
 const JOB_STORAGE_KEY = "exportJob";
 const PROGRESS_STORAGE_KEY = "exportProgress";
@@ -29,6 +30,15 @@ let offscreenCreating = null;
 let jobStartInProgress = false;
 let searchFlowInProgress = false;
 const contentInjectionByTab = new Map();
+const NATIVE_DIAGNOSTIC_RANK = Object.freeze({
+  NM_REFERRER: 1,
+  NM_URL: 2,
+  NM_DOCUMENT: 3,
+  NM_BASE: 4,
+  NM_ID_MISSING: 5,
+  NM_ID_MISMATCH: 6,
+  NM_OWNER: 7,
+});
 
 function delay(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -71,6 +81,25 @@ function mutateJob(mutator) {
 
 async function appendJobLog(line) {
   return mutateJob((job) => consAppendJobLog(job, line));
+}
+
+async function appendDownloadDiagnostic(jobId, code, count = 1) {
+  return mutateJob((job) => {
+    if (job.id === jobId) consAppendDownloadDiagnostic(job, code, count);
+    return job;
+  });
+}
+
+async function rememberNativeMatchDecision(jobId, decision) {
+  if (!decision?.candidate || !NATIVE_DIAGNOSTIC_RANK[decision.code]) return;
+  await mutateJob((job) => {
+    if (job.id !== jobId || job.current?.downloadKind !== "native") return job;
+    const previousRank = NATIVE_DIAGNOSTIC_RANK[job.current.nativeMatchCode] || 0;
+    if (NATIVE_DIAGNOSTIC_RANK[decision.code] > previousRank) {
+      job.current.nativeMatchCode = decision.code;
+    }
+    return job;
+  });
 }
 
 async function getDownloadFolder() {
@@ -247,29 +276,35 @@ async function cancelGuardedDownload(job, downloadItem) {
   if (!guard) return false;
   if (Number(guard.expiresAt || 0) < Date.now()) {
     await mutateJob((draft) => {
-      if (draft.id === job.id) draft.cancelGuard = null;
+      if (draft.id === job.id) {
+        draft.cancelGuard = null;
+        consAppendDownloadDiagnostic(draft, "DG_EXPIRED");
+      }
       return draft;
     });
     return false;
   }
   if (!matchesCurrentDownload(downloadItem, guard)) return false;
 
-  let cancellationError = null;
+  let diagnosticCode;
+  let logLine;
   try {
     if (downloadItem.state === "in_progress") {
       await chrome.downloads.cancel(downloadItem.id);
+      diagnosticCode = "DG_CANCEL_LATE";
+      logLine = "Поздно появившаяся связанная загрузка отменена";
     } else {
-      cancellationError = `Отложенная загрузка ${downloadItem.id} уже не выполняется`;
+      diagnosticCode = "DG_ALREADY_TERMINAL";
+      logLine = "Связанная загрузка уже завершилась до отмены";
     }
-  } catch (error) {
-    cancellationError = `Не удалось отменить отложенную загрузку ${downloadItem.id}: ${errorText(error)}`;
+  } catch {
+    diagnosticCode = "DG_CANCEL_FAILED";
+    logLine = "Не удалось отменить поздно появившуюся связанную загрузку";
   }
   await mutateJob((draft) => {
     if (draft.id === job.id) {
-      consAppendJobLog(
-        draft,
-        cancellationError || `Отложенная загрузка ${downloadItem.id} отменена`
-      );
+      consAppendDownloadDiagnostic(draft, diagnosticCode);
+      consAppendJobLog(draft, logLine);
     }
     return draft;
   });
@@ -287,7 +322,14 @@ async function attachCreatedDownload(downloadItem) {
     return;
   }
   if (job.current?.downloadId != null) return;
-  if (!matchesCurrentDownload(downloadItem, job.current)) return;
+  const nativeDecision =
+    job.current?.downloadKind === "native"
+      ? consNativeDownloadDecision(downloadItem, job.current)
+      : null;
+  if (!(nativeDecision?.match ?? matchesCurrentDownload(downloadItem, job.current))) {
+    await rememberNativeMatchDecision(job.id, nativeDecision);
+    return;
+  }
 
   const updated = await mutateJob((draft) => {
     if (
@@ -302,6 +344,9 @@ async function attachCreatedDownload(downloadItem) {
     }
     draft.current.downloadId = downloadItem.id;
     draft.phase = "waiting_download";
+    if (draft.current.downloadKind === "native") {
+      consAppendDownloadDiagnostic(draft, "NM_ATTACHED");
+    }
     return draft;
   });
   if (
@@ -334,7 +379,9 @@ async function findRecentDownloads(current) {
 async function findRecentDownload(current) {
   const matches = await findRecentDownloads(current);
   if (matches.length > 1) {
-    throw new Error("Найдено несколько подходящих загрузок; сопоставление неоднозначно");
+    const error = new Error("Найдено несколько подходящих загрузок; сопоставление неоднозначно");
+    error.code = "NM_AMBIGUOUS";
+    throw error;
   }
   return matches[0];
 }
@@ -347,18 +394,36 @@ async function waitForCurrentDownloadId(jobId, timeoutMs) {
     if (job.stopRequested) throw new Error("Экспорт остановлен пользователем");
     if (job.current?.downloadId != null) return job.current.downloadId;
 
-    const recovered = job.current && (await findRecentDownload(job.current));
+    let recovered;
+    try {
+      recovered = job.current && (await findRecentDownload(job.current));
+    } catch (error) {
+      if (error?.code === "NM_AMBIGUOUS" && job.current?.downloadKind === "native") {
+        await appendDownloadDiagnostic(job.id, "NM_AMBIGUOUS");
+      }
+      throw error;
+    }
     if (recovered) {
       await mutateJob((draft) => {
         if (draft.id === jobId && draft.current) {
           draft.current.downloadId = recovered.id;
           draft.phase = "waiting_download";
+          if (draft.current.downloadKind === "native") {
+            consAppendDownloadDiagnostic(draft, "NM_RECOVERED");
+          }
         }
         return draft;
       });
       return recovered.id;
     }
     await delay(POLL_MS);
+  }
+  const timedOutJob = await readJob();
+  if (timedOutJob?.id === jobId && timedOutJob.current?.downloadKind === "native") {
+    await appendDownloadDiagnostic(
+      jobId,
+      timedOutJob.current.nativeMatchCode || "NM_TIMEOUT"
+    );
   }
   throw new Error("Загрузка не началась за отведённое время");
 }
@@ -412,6 +477,26 @@ async function waitTabComplete(
     await delay(300);
   }
   throw new Error("Превышено время загрузки вкладки");
+}
+
+function observeTabLoadCycle(tabId) {
+  const state = { sawLoading: false, sawComplete: false };
+  const listener = (updatedTabId, changeInfo) => {
+    if (updatedTabId !== tabId) return;
+    if (changeInfo.status === "loading") {
+      state.sawLoading = true;
+      state.sawComplete = false;
+    } else if (changeInfo.status === "complete" && state.sawLoading) {
+      state.sawComplete = true;
+    }
+  };
+  chrome.tabs.onUpdated.addListener(listener);
+  return {
+    state,
+    dispose() {
+      chrome.tabs.onUpdated.removeListener(listener);
+    },
+  };
 }
 
 function isMissingContentReceiver(error) {
@@ -483,30 +568,6 @@ async function waitDocumentReady(tabId, format, jobId) {
             : ping.capabilities.menuSaveReady;
         if (!native || nativeReady) return ping;
         lastError = "Команда нативного сохранения ещё не готова";
-      }
-    } catch (error) {
-      if (error?.code === "AUTH_REQUIRED") throw error;
-      lastError = errorText(error);
-    }
-    await delay(300);
-  }
-  throw new Error(lastError);
-}
-
-async function waitSearchResultsReady(tabId) {
-  const deadline = Date.now() + CONTENT_TIMEOUT_MS;
-  let lastError = "Поисковая выдача ещё не готова";
-  while (Date.now() < deadline) {
-    try {
-      const ping = await sendToTab(tabId, { type: "PING" });
-      if (!ping?.ok) {
-        lastError = ping?.error || lastError;
-      } else if (ping.authRequired || ping.page === "auth-required") {
-        const error = new Error("Сначала войдите в онлайн-КонсультантПлюс");
-        error.code = "AUTH_REQUIRED";
-        throw error;
-      } else if (ping.capabilities?.resultsReady) {
-        return ping;
       }
     } catch (error) {
       if (error?.code === "AUTH_REQUIRED") throw error;
@@ -769,38 +830,61 @@ async function saveJobReport(job) {
 }
 
 async function stopCurrentWork(job) {
-  let cancelGuard = createCancelGuard(job.current);
+  const cancelGuard = createCancelGuard(job.current);
   let stopWarning = null;
   if (cancelGuard) {
+    const guardWasArmed = Boolean(job.cancelGuard);
     await mutateJob((draft) => {
-      if (draft.id === job.id) draft.cancelGuard = cancelGuard;
+      if (draft.id === job.id) {
+        draft.cancelGuard = cancelGuard;
+        if (!guardWasArmed) consAppendDownloadDiagnostic(draft, "DG_ARMED");
+      }
       return draft;
     });
     const deadline = Date.now() + 1500;
     let matches = [];
+    let cancelledCount = 0;
+    let cancellationFailures = 0;
+    let scanFailed = false;
     try {
       while (!matches.length && Date.now() < deadline) {
         matches = await findRecentDownloads(job.current);
         if (!matches.length) await delay(150);
       }
-      const cancellationErrors = [];
       for (const match of matches) {
         if (match.state !== "in_progress") continue;
         try {
           await chrome.downloads.cancel(match.id);
-        } catch (error) {
-          cancellationErrors.push(`${match.id}: ${errorText(error)}`);
+          cancelledCount += 1;
+        } catch {
+          cancellationFailures += 1;
         }
       }
-      if (cancellationErrors.length) {
-        stopWarning = `Не удалось отменить загрузки: ${cancellationErrors.join("; ")}`;
-      }
-    } catch (error) {
-      stopWarning = errorText(error);
+    } catch {
+      scanFailed = true;
     }
-    stopWarning ||= matches.length
-      ? `Отменено связанных загрузок: ${matches.filter((item) => item.state === "in_progress").length}`
-      : "Загрузка ещё не обнаружена; при позднем старте расширение попытается её отменить";
+    stopWarning = scanFailed
+      ? "Не удалось проверить состояние связанной загрузки"
+      : cancellationFailures
+        ? "Не все связанные загрузки удалось отменить"
+        : matches.length
+          ? "Связанные выполнявшиеся загрузки остановлены"
+          : "Загрузка ещё не обнаружена; поздний старт будет перехвачен";
+
+    await mutateJob((draft) => {
+      if (draft.id !== job.id) return draft;
+      if (scanFailed) consAppendDownloadDiagnostic(draft, "DG_SCAN_FAILED");
+      if (cancelledCount) {
+        consAppendDownloadDiagnostic(draft, "DG_CANCEL_EXISTING", cancelledCount);
+      }
+      if (cancellationFailures) {
+        consAppendDownloadDiagnostic(draft, "DG_CANCEL_FAILED", cancellationFailures);
+      }
+      if (!scanFailed && !matches.length) {
+        consAppendDownloadDiagnostic(draft, "DG_PENDING", 0);
+      }
+      return draft;
+    });
   }
   await cleanupResources(job, true);
   await mutateJob((draft) => {
@@ -1023,34 +1107,6 @@ async function findSearchTab() {
   return null;
 }
 
-async function waitSearchReady(tabId, scope) {
-  const deadline = Date.now() + CONTENT_TIMEOUT_MS;
-  let lastError = "Поисковый интерфейс ещё не готов";
-  while (Date.now() < deadline) {
-    try {
-      const ping = await sendToTab(tabId, { type: "PING" });
-      if (!ping?.ok) {
-        lastError = ping?.error || lastError;
-      } else if (ping.authRequired || ping.page === "auth-required") {
-        const error = new Error("Сначала войдите в онлайн-КонсультантПлюс");
-        error.code = "AUTH_REQUIRED";
-        throw error;
-      } else if (
-        ping.adapter !== "online-app" ||
-        scope === "all" ||
-        ping.capabilities?.searchReady
-      ) {
-        return ping;
-      }
-    } catch (error) {
-      if (error?.code === "AUTH_REQUIRED") throw error;
-      lastError = errorText(error);
-    }
-    await delay(300);
-  }
-  throw new Error(lastError);
-}
-
 async function executeSearchFlow(message) {
   const query = String(message.query || "").trim();
   if (!query) throw new Error("Введите запрос");
@@ -1064,28 +1120,26 @@ async function executeSearchFlow(message) {
     });
     await waitTabComplete(tab.id, TAB_TIMEOUT_MS);
   }
-  await waitSearchReady(tab.id, message.scope || "practice");
-  const beforeUrl = tab.url;
-  let result = await sendToTab(tab.id, {
-    type: "RUN_SEARCH",
-    query,
-    scope: message.scope || "practice",
-  });
-
-  if (result?.navigating) {
-    await waitTabComplete(tab.id, TAB_TIMEOUT_MS, result.url || null);
-    await waitSearchResultsReady(tab.id);
-    result = await sendToTab(tab.id, { type: "COLLECT_LIST" });
-    if (result?.ok) result = { ...result, query, scope: message.scope || "practice" };
-  } else if (result?.ok && result.url && result.url !== beforeUrl) {
-    await waitTabComplete(tab.id, TAB_TIMEOUT_MS);
-  }
-
-  if (!result?.ok) {
-    const error = new Error(result?.error || "Поиск не удался");
-    error.code = result?.code;
+  const ping = await waitContentReady(tab.id);
+  if (ping.authRequired || ping.page === "auth-required") {
+    const error = new Error("Сначала войдите в онлайн-КонсультантПлюс");
+    error.code = "AUTH_REQUIRED";
     throw error;
   }
+
+  const scope = String(
+    message.scope || (ping.adapter === "public-site" ? "all" : "practice")
+  );
+  const searchFlow = consCreateSearchFlow({
+    sendToTab,
+    navigate: (tab, searchUrl) => chrome.tabs.update(tab.id, { url: searchUrl }),
+    observeTabLoadCycle,
+    buildOnlineSearchUrl: consBuildOnlineSearchUrl,
+    buildPublicSearchUrl: consBuildPublicSearchUrl,
+    delay,
+    timeoutMs: CONTENT_TIMEOUT_MS,
+  });
+  const result = await searchFlow.run({ tab, adapter: ping.adapter, query, scope });
 
   if (message.autoExport && result.items?.length) {
     const started = await startExportJob({
@@ -1094,7 +1148,7 @@ async function executeSearchFlow(message) {
       format: message.format,
       maxItems: message.maxItems,
       query,
-      scope: message.scope,
+      scope,
     });
     return {
       ...result,
@@ -1161,6 +1215,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, progress: consJobProgress(job), running: consIsJobActive(job) };
       }
 
+      case "GET_DOWNLOAD_DIAGNOSTICS": {
+        const job = await readJob();
+        return { ok: true, diagnostics: consSafeDownloadDiagnostics(job) };
+      }
+
       case "STOP_EXPORT": {
         const job = await readJob();
         if (!consIsJobActive(job)) return { ok: true, stopped: false };
@@ -1169,6 +1228,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           draft.stopRequested = true;
           draft.status = "stopping";
           draft.cancelGuard = createCancelGuard(draft.current);
+          if (draft.cancelGuard) {
+            consAppendDownloadDiagnostic(draft, "DG_ARMED");
+          }
           consAppendJobLog(draft, "Запрос остановки…");
           return draft;
         });

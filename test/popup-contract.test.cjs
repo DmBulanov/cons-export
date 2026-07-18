@@ -19,3 +19,12 @@ test("cached result provenance is exported with the cached list", () => {
     /type: "START_TAB_EXPORT",[\s\S]{0,400}query: els\.query\.value\.trim\(\)/
   );
 });
+
+test("copied diagnostics use the shared allowlist and never copy the job log", () => {
+  assert.match(source, /type: "GET_DOWNLOAD_DIAGNOSTICS"/);
+  assert.match(source, /consBuildSafeDiagnosticsSnapshot/);
+  assert.doesNotMatch(
+    source,
+    /btnProbe[\s\S]{0,1200}(?:progress\.log|response\.progress|job\.log)/
+  );
+});

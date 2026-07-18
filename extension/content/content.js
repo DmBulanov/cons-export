@@ -119,6 +119,60 @@
           return { ok: true, adapter: adapter.id, ...result };
         }
 
+        case "GET_SEARCH_STATE": {
+          if (page === "auth-required") {
+            return errorResponse(
+              "AUTH_REQUIRED",
+              "Сначала войдите в онлайн-КонсультантПлюс"
+            );
+          }
+          if (!capabilities.search || typeof adapter.getSearchState !== "function") {
+            return errorResponse(
+              "UNSUPPORTED_PAGE",
+              "Состояние поиска недоступно на этой странице"
+            );
+          }
+          return {
+            ok: true,
+            adapter: adapter.id,
+            page,
+            state: adapter.getSearchState(msg.query),
+          };
+        }
+
+        case "CLICK_SEARCH_SCOPE": {
+          if (page === "auth-required") {
+            return errorResponse(
+              "AUTH_REQUIRED",
+              "Сначала войдите в онлайн-КонсультантПлюс"
+            );
+          }
+          const scope = msg.scope || "practice";
+          if (
+            !capabilities.search ||
+            typeof adapter.triggerSearchScope !== "function"
+          ) {
+            return errorResponse(
+              "UNSUPPORTED_SCOPE",
+              "Переключение области поиска недоступно на этой странице"
+            );
+          }
+          if (
+            Array.isArray(capabilities.searchScopes) &&
+            !capabilities.searchScopes.includes(scope)
+          ) {
+            return errorResponse(
+              "UNSUPPORTED_SCOPE",
+              `Область «${scope}» недоступна для адаптера ${adapter.id}`
+            );
+          }
+          return {
+            ok: true,
+            adapter: adapter.id,
+            ...adapter.triggerSearchScope(scope),
+          };
+        }
+
         case "PROBE": {
           if (typeof adapter.probe !== "function") {
             return { ok: false, error: "Probe недоступен на этом адаптере" };

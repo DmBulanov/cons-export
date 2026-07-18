@@ -4,6 +4,11 @@ const path = require("node:path");
 const test = require("node:test");
 const vm = require("node:vm");
 
+const {
+  consBuildOnlineSearchUrl,
+  consBuildPublicSearchUrl,
+} = require("../extension/shared/runtime.js");
+
 const root = path.resolve(__dirname, "..");
 const publicAdapterSource = fs.readFileSync(
   path.join(root, "extension/content/adapters/public-site.js"),
@@ -65,6 +70,8 @@ function loadAdapter(source, name, { location, document, extras = {} }) {
     clearTimeout,
     setInterval,
     clearInterval,
+    consBuildOnlineSearchUrl,
+    consBuildPublicSearchUrl,
     ...extras,
   });
   vm.runInContext(source, context, { filename: `${name}.js` });
@@ -91,10 +98,9 @@ test("public search navigates when the current result page belongs to an older q
 
   assert.equal(result.navigating, true);
   assert.equal(result.scope, "all");
-  assert.equal(result.scopeApplied, true);
-  assert.deepEqual(location.assigned, [
-    "https://www.consultant.ru/search/?q=new%20query",
-  ]);
+  assert.equal(result.scopeApplied, false);
+  assert.equal(new URL(result.url).searchParams.get("q"), "new query");
+  assert.deepEqual(location.assigned, []);
 });
 
 test("public search compares the decoded q value and reuses only the same query", async () => {
@@ -185,13 +191,13 @@ test("online search does not type into an unrelated generic text input", async (
   assert.equal(result.navigating, true);
   assert.equal(genericInput.focused, false);
   assert.equal(queried.includes('input[type="text"]'), false);
-  assert.match(location.assigned[0], /splusFind=lease%20debt/);
+  assert.equal(new URL(result.url).searchParams.get("splusFind"), "lease debt");
+  assert.deepEqual(location.assigned, []);
 
-  await assert.rejects(
-    adapter.runSearch("lease debt", { scope: "practice" }),
-    (error) => error.code === "SEARCH_INPUT_NOT_FOUND"
-  );
-  assert.equal(location.assigned.length, 1);
+  const practice = await adapter.runSearch("lease debt", { scope: "practice" });
+  assert.equal(practice.navigating, true);
+  assert.equal(new URL(practice.url).searchParams.get("splusFind"), "lease debt");
+  assert.deepEqual(location.assigned, []);
 });
 
 test("online direct export fails safely when the document pane is not ready", async () => {
@@ -209,7 +215,7 @@ test("online direct export fails safely when the document pane is not ready", as
   );
 });
 
-test("online search waits for a changed result set and a confirmed practice preset", async () => {
+test("online runSearch returns a navigation plan without mutating the current document", async () => {
   const location = makeLocation(
     "https://online.consultant.ru/riv/cgi/online.cgi?req=card&page=splus#splus"
   );
@@ -353,15 +359,16 @@ test("online search waits for a changed result set and a confirmed practice pres
   const result = await adapter.runSearch("new query", { scope: "practice" });
 
   assert.equal(result.scope, "practice");
-  assert.equal(result.scopeApplied, true);
-  assert.equal(result.count, 1);
-  assert.equal(result.items[0].title, "Filtered practice result");
-  assert.deepEqual(input.events, ["input", "change"]);
-  assert.match(practicePreset.className, /selected/);
+  assert.equal(result.scopeApplied, false);
+  assert.equal(result.navigating, true);
+  assert.equal(result.count, 0);
+  assert.equal(result.items.length, 0);
+  assert.deepEqual(input.events, []);
+  assert.doesNotMatch(practicePreset.className, /selected/);
   assert.equal(staleSearchAccepted, false);
 });
 
-test("online search accepts an unchanged result set only after loading completes", async () => {
+test("online search state does not report a different or missing query as ready", async () => {
   const location = makeLocation(
     "https://online.consultant.ru/riv/cgi/online.cgi?req=card&page=splus#splus"
   );
@@ -414,19 +421,207 @@ test("online search accepts an unchanged result set only after loading completes
     document,
     extras: { MutationObserver: FakeMutationObserver },
   });
-  const signature = `${link.href}\n${link.innerText}`;
-
-  const pending = adapter._waitForSearchUpdate(signature);
   resultRoot.loading = true;
   notify(resultRoot);
-  setTimeout(() => {
-    resultRoot.loading = false;
-    notify(resultRoot);
-  }, 200);
+  const loadingState = adapter.getSearchState("expected query");
+  assert.equal(loadingState.loading, true);
+  assert.equal(loadingState.resultsReady, false);
+  assert.equal(loadingState.queryMatches, false);
 
-  const items = await pending;
-  assert.equal(items.length, 1);
-  assert.equal(items[0].title, "Same result");
+  resultRoot.loading = false;
+  notify(resultRoot);
+  const settledState = adapter.getSearchState("expected query");
+  assert.equal(settledState.resultsReady, true);
+  assert.equal(settledState.queryMatches, false);
+  assert.equal(settledState.items[0].title, "Same result");
+});
+
+test("online state is atomic and scope clicks are deferred until after the response", () => {
+  const location = makeLocation(
+    "https://online.consultant.ru/riv/cgi/online.cgi?req=card&page=splus&splusFind=" +
+      encodeURIComponent("долг + аренда & суд # 10%") +
+      "#splus"
+  );
+  const queuedTimers = [];
+  const input = { value: "долг + аренда & суд # 10%" };
+  const link = {
+    href: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW&n=10",
+    innerText: "Судебный результат",
+  };
+  const allPreset = {
+    innerText: "Все документы",
+    className: "x-page-search-plus-presets__preset--active",
+    active: true,
+    matches() {
+      return this.active;
+    },
+    querySelector() {
+      return null;
+    },
+    getAttribute() {
+      return null;
+    },
+    click() {
+      this.active = true;
+      practicePreset.active = false;
+    },
+  };
+  const practicePreset = {
+    innerText: "Судебная практика",
+    className: "x-page-search-plus-presets__preset",
+    active: false,
+    matches() {
+      return this.active;
+    },
+    querySelector() {
+      return null;
+    },
+    getAttribute() {
+      return null;
+    },
+    click() {
+      this.active = true;
+      allPreset.active = false;
+    },
+  };
+  const resultsRoot = {
+    matches() {
+      return false;
+    },
+    querySelector() {
+      return null;
+    },
+  };
+  const document = baseDocument({
+    body: { innerText: "Search results", click() {} },
+    querySelector(selector) {
+      if (selector === 'input[type="password"]') return null;
+      if (selector.includes("search-panel")) return input;
+      if (selector.includes("search-results") || selector.includes("search-result-list")) {
+        return resultsRoot;
+      }
+      if (selector.includes("search-result-item")) return link;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector.includes("search-result-item__extra")) return [link];
+      if (selector.includes("presets__preset")) return [allPreset, practicePreset];
+      return [];
+    },
+  });
+  const { adapter } = loadAdapter(onlineAdapterSource, "onlineApp", {
+    location,
+    document,
+    extras: {
+      setTimeout(callback) {
+        queuedTimers.push(callback);
+        return queuedTimers.length;
+      },
+    },
+  });
+
+  const initial = adapter.getSearchState("долг + аренда & суд # 10%");
+  assert.equal(initial.queryMatches, true);
+  assert.equal(initial.activeScope, "all");
+  assert.equal(initial.resultsReady, true);
+  assert.equal(initial.resultCount, 1);
+  assert.equal(initial.items[0].title, "Судебный результат");
+
+  const triggerPractice = adapter.triggerSearchScope("practice");
+  assert.equal(triggerPractice.triggered, true);
+  assert.equal(practicePreset.active, false, "click must not run in the response task");
+  queuedTimers.shift()();
+  assert.equal(adapter.getSearchState("долг + аренда & суд # 10%").activeScope, "practice");
+
+  const alreadyPractice = adapter.triggerSearchScope("practice");
+  assert.equal(alreadyPractice.triggered, false);
+  assert.equal(queuedTimers.length, 0);
+
+  const triggerAll = adapter.triggerSearchScope("all");
+  assert.equal(triggerAll.triggered, true);
+  queuedTimers.shift()();
+  assert.equal(adapter.getSearchState("долг + аренда & суд # 10%").activeScope, "all");
+});
+
+test("online query state falls back to the decoded splusFind parameter", () => {
+  const query = "плюс + амперсанд & решётка # процент %";
+  const location = makeLocation(
+    `https://online.consultant.ru/riv/cgi/online.cgi?req=card&page=splus&splusFind=${encodeURIComponent(query)}#splus`
+  );
+  const document = baseDocument({
+    body: { innerText: "Ничего не найдено", click() {} },
+  });
+  const { adapter } = loadAdapter(onlineAdapterSource, "onlineApp", {
+    location,
+    document,
+  });
+
+  const state = adapter.getSearchState(query);
+  assert.equal(state.queryMatches, true);
+  assert.equal(state.emptyResults, true);
+  assert.equal(state.resultsReady, true);
+
+  const plan = adapter.runSearch(`${query} ещё`, { scope: "all" });
+  return plan.then((result) => {
+    assert.equal(new URL(result.url).searchParams.get("splusFind"), `${query} ещё`);
+    assert.deepEqual(location.assigned, []);
+  });
+});
+
+test("an edited but unsubmitted online input is not treated as authoritative results", async () => {
+  const location = makeLocation(
+    "https://online.consultant.ru/riv/cgi/online.cgi?req=card&page=splus#splus"
+  );
+  const input = { value: "новый несохранённый запрос" };
+  const link = {
+    href: "https://online.consultant.ru/riv/cgi/online.cgi?req=doc&base=LAW&n=1",
+    innerText: "Старый результат",
+  };
+  const allPreset = {
+    innerText: "Все",
+    className: "x-page-search-plus-presets__preset--active",
+    matches() {
+      return true;
+    },
+    querySelector() {
+      return null;
+    },
+    getAttribute() {
+      return null;
+    },
+  };
+  const document = baseDocument({
+    body: { innerText: "Search results", click() {} },
+    querySelector(selector) {
+      if (selector.includes("search-panel")) return input;
+      if (selector.includes("search-result-item")) return link;
+      return null;
+    },
+    querySelectorAll(selector) {
+      if (selector.includes("search-result-item__extra")) return [link];
+      if (selector.includes("presets__preset")) return [allPreset];
+      return [];
+    },
+  });
+  const { adapter } = loadAdapter(onlineAdapterSource, "onlineApp", {
+    location,
+    document,
+  });
+
+  const state = adapter.getSearchState("новый несохранённый запрос");
+  assert.equal(state.queryMatches, true);
+  assert.equal(state.queryAuthoritative, false);
+  assert.equal(state.activeScope, "all");
+  assert.equal(state.items[0].title, "Старый результат");
+
+  const result = await adapter.runSearch("новый несохранённый запрос", {
+    scope: "all",
+  });
+  assert.equal(result.navigating, true);
+  assert.equal(
+    new URL(result.url).searchParams.get("splusFind"),
+    "новый несохранённый запрос"
+  );
 });
 
 function loadRouter(adapters, url = "https://unsupported.example/") {
@@ -534,4 +729,52 @@ test("content router exposes AUTH_REQUIRED and rejects unsupported scopes before
 
   assert.equal(scope.code, "UNSUPPORTED_SCOPE");
   assert.equal(searchCalls, 0);
+});
+
+test("content router exposes atomic search state and returns before a deferred scope click", async () => {
+  let clicked = false;
+  let timerCallback = null;
+  const adapter = {
+    id: "online-app",
+    matches: () => true,
+    detectPage: () => "list",
+    getCapabilities: () => ({
+      search: true,
+      searchScopes: ["all", "practice"],
+    }),
+    getSearchState: (query) => ({
+      queryMatches: query === "точный запрос",
+      queryAuthoritative: query === "точный запрос",
+      activeScope: "all",
+      loading: false,
+      resultsReady: true,
+      items: [],
+    }),
+    triggerSearchScope: () => {
+      timerCallback = () => {
+        clicked = true;
+      };
+      return {
+        triggered: true,
+        navigationExpected: true,
+        beforeSignature: "before",
+      };
+    },
+  };
+  const request = loadRouter(
+    { onlineApp: adapter },
+    "https://online.consultant.ru/riv/cgi/online.cgi?req=card&page=splus"
+  );
+
+  const state = await request({ type: "GET_SEARCH_STATE", query: "точный запрос" });
+  assert.equal(state.ok, true);
+  assert.equal(state.state.queryMatches, true);
+
+  const trigger = await request({ type: "CLICK_SEARCH_SCOPE", scope: "practice" });
+  assert.equal(trigger.ok, true);
+  assert.equal(trigger.triggered, true);
+  assert.equal(clicked, false);
+  assert.equal(typeof timerCallback, "function");
+  timerCallback();
+  assert.equal(clicked, true);
 });

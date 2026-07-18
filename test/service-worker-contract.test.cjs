@@ -7,20 +7,31 @@ const source = fs.readFileSync(
   path.resolve(__dirname, "../extension/background/service-worker.js"),
   "utf8"
 );
+const searchSource = fs.readFileSync(
+  path.resolve(__dirname, "../extension/background/search-flow.js"),
+  "utf8"
+);
 
 test("service worker persists jobs and has an alarm-backed resume path", () => {
   assert.match(source, /chrome\.storage\.session\.set/);
   assert.match(source, /chrome\.alarms\.create\(RESUME_ALARM/);
   assert.match(source, /chrome\.alarms\.onAlarm\.addListener/);
   assert.match(source, /readJob\(\)[\s\S]+ensureExportRunner/);
-  assert.doesNotMatch(source, /const state\s*=\s*\{[\s\S]*running:/);
+  assert.doesNotMatch(source, /const state\s*=\s*\{\s*running:/);
 });
 
-test("background serializes searches and waits for the online search UI", () => {
+test("background owns query navigation and verifies query, scope, and settled results", () => {
   assert.match(source, /if \(searchFlowInProgress\) throw new Error\("Поиск уже выполняется"\)/);
-  assert.match(source, /await waitSearchReady\(tab\.id, message\.scope \|\| "practice"\)/);
-  assert.match(source, /ping\.capabilities\?\.searchReady/);
-  assert.match(source, /await waitSearchResultsReady\(tab\.id\)/);
+  assert.match(source, /chrome\.tabs\.update\(tab\.id, \{ url: searchUrl \}\)/);
+  assert.match(source, /importScripts\("search-flow\.js"\)/);
+  assert.match(searchSource, /type: "GET_SEARCH_STATE"/);
+  assert.match(searchSource, /type: "CLICK_SEARCH_SCOPE"/);
+  assert.match(searchSource, /state\.queryMatches/);
+  assert.match(searchSource, /state\.queryAuthoritative/);
+  assert.match(searchSource, /state\.activeScope === scope/);
+  assert.match(searchSource, /state\.resultsReady/);
+  assert.match(source, /observeTabLoadCycle/);
+  assert.doesNotMatch(source, /sendToTab\(tab\.id, \{\s*type: "RUN_SEARCH"/);
 });
 
 test("export waits for the document pane and native controls", () => {
@@ -35,7 +46,20 @@ test("download completion and native filename determination are explicit", () =>
   assert.match(source, /item\.state === "interrupted"/);
   assert.match(source, /waitForDownloadCompletion/);
   assert.match(source, /consMatchesNativeDownload/);
+  assert.match(source, /consNativeDownloadDecision/);
   assert.match(source, /sourceUrl: url/);
+});
+
+test("download diagnostics are closed, separate from reports, and exposed safely", () => {
+  assert.match(source, /consNativeDownloadDecision/);
+  assert.match(source, /consAppendDownloadDiagnostic/);
+  assert.match(source, /case "GET_DOWNLOAD_DIAGNOSTICS"/);
+  assert.match(source, /consSafeDownloadDiagnostics\(job\)/);
+  const reportBody = source.slice(
+    source.indexOf("function serializeJobReport"),
+    source.indexOf("async function saveJobReport")
+  );
+  assert.doesNotMatch(reportBody, /downloadDiagnostics|nativeMatchCode/);
 });
 
 test("stop requests are checked before tab extraction and while saving the report", () => {

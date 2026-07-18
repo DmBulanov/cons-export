@@ -1,7 +1,14 @@
 /** Pure export-job state helpers. Loaded by the service worker and Node tests. */
 (function () {
+  const diagnosticsApi =
+    typeof module !== "undefined" && module.exports
+      ? require("../shared/runtime.js")
+      : globalThis;
   const ACTIVE_JOB_STATUSES = new Set(["running", "stopping"]);
   const TERMINAL_ITEM_STATUSES = new Set(["completed", "failed", "stopped"]);
+  const DOWNLOAD_DIAGNOSTIC_CODES = new Set(
+    diagnosticsApi.CONS_DOWNLOAD_DIAGNOSTIC_CODES
+  );
 
   function consCreateExportJob(input, now = Date.now()) {
     const items = (input.items || []).map((item, offset) => ({
@@ -33,6 +40,7 @@
       current: null,
       lastError: null,
       log: [],
+      downloadDiagnostics: [],
       reportEnabled: input.reportEnabled !== false,
       report: null,
       items,
@@ -48,6 +56,26 @@
     job.log = [...(job.log || []).slice(-99), entry];
     job.updatedAt = new Date(now).toISOString();
     return job;
+  }
+
+  function consAppendDownloadDiagnostic(job, code, count = 1, now = Date.now()) {
+    if (!DOWNLOAD_DIAGNOSTIC_CODES.has(code)) {
+      throw new Error(`Неизвестный диагностический код: ${code}`);
+    }
+    const numericCount = Number(count);
+    const countBucket = numericCount <= 0 ? "0" : numericCount === 1 ? "1" : "many";
+    const event = {
+      at: new Date(now).toISOString(),
+      code,
+      countBucket,
+    };
+    job.downloadDiagnostics = [...(job.downloadDiagnostics || []).slice(-31), event];
+    job.updatedAt = event.at;
+    return job;
+  }
+
+  function consSafeDownloadDiagnostics(job) {
+    return diagnosticsApi.consSanitizeDownloadDiagnostics(job?.downloadDiagnostics);
   }
 
   function consMarkItemStarted(job, itemIndex, now = Date.now()) {
@@ -66,6 +94,7 @@
       sourceUrl: null,
       downloadKind: null,
       downloadStartedAt: null,
+      nativeMatchCode: null,
     };
     job.updatedAt = new Date(now).toISOString();
     return job;
@@ -131,12 +160,14 @@
 
   const api = {
     consAppendJobLog,
+    consAppendDownloadDiagnostic,
     consCreateExportJob,
     consFinishJob,
     consIsJobActive,
     consJobProgress,
     consMarkItemFinished,
     consMarkItemStarted,
+    consSafeDownloadDiagnostics,
   };
   Object.assign(globalThis, api);
   if (typeof module !== "undefined" && module.exports) module.exports = api;

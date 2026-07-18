@@ -347,21 +347,6 @@ async function exportCurrentDocument() {
   }
 }
 
-function sanitizedProbe(probe) {
-  const allowed = [
-    "hostname",
-    "page",
-    "listCount",
-    "hasFullTextButton",
-    "hasWord",
-    "hasDots",
-    "hasNext",
-    "hasDocPane",
-    "docTextLen",
-  ];
-  return Object.fromEntries(allowed.filter((key) => key in (probe || {})).map((key) => [key, probe[key]]));
-}
-
 function pollWhileRunning() {
   if (progressTimer) clearInterval(progressTimer);
   els.btnStop.hidden = false;
@@ -406,12 +391,22 @@ els.btnStop.addEventListener("click", async () => {
 });
 
 els.btnProbe.addEventListener("click", async () => {
-  const response = await tabMessage({ type: "PROBE" });
-  if (!response?.ok) {
-    setLog(response?.error || "Диагностика недоступна");
+  const [pageResponse, downloadResponse] = await Promise.all([
+    tabMessage({ type: "PROBE" }),
+    sendMessage({ type: "GET_DOWNLOAD_DIAGNOSTICS" }),
+  ]);
+  if (!pageResponse?.ok && !downloadResponse?.ok) {
+    setLog(pageResponse?.error || downloadResponse?.error || "Диагностика недоступна");
     return;
   }
-  const text = JSON.stringify(sanitizedProbe(response.probe), null, 2);
+  const text = JSON.stringify(
+    consBuildSafeDiagnosticsSnapshot(
+      pageResponse?.ok ? pageResponse.probe : {},
+      downloadResponse?.ok ? downloadResponse.diagnostics : []
+    ),
+    null,
+    2
+  );
   setLog(text);
   try {
     await navigator.clipboard.writeText(text);

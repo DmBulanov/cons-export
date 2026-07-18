@@ -3,13 +3,58 @@ const test = require("node:test");
 
 const {
   consAppendJobLog,
+  consAppendDownloadDiagnostic,
   consCreateExportJob,
   consFinishJob,
   consIsJobActive,
   consJobProgress,
   consMarkItemFinished,
   consMarkItemStarted,
+  consSafeDownloadDiagnostics,
 } = require("../extension/background/export-job.js");
+
+test("download diagnostics accept only closed codes and never copy sensitive values", () => {
+  const job = createJob();
+  job.query = "SECRET_QUERY";
+  job.items[0].title = "SECRET_TITLE";
+  job.items[0].url = "https://online.consultant.ru/?token=SECRET_URL";
+
+  consAppendDownloadDiagnostic(job, "NM_REFERRER", 1, Date.UTC(2026, 6, 18, 10, 0, 1));
+  consAppendDownloadDiagnostic(job, "DG_CANCEL_EXISTING", 4, Date.UTC(2026, 6, 18, 10, 0, 2));
+
+  assert.deepEqual(job.downloadDiagnostics, [
+    { at: "2026-07-18T10:00:01.000Z", code: "NM_REFERRER", countBucket: "1" },
+    { at: "2026-07-18T10:00:02.000Z", code: "DG_CANCEL_EXISTING", countBucket: "many" },
+  ]);
+  assert.doesNotMatch(JSON.stringify(job.downloadDiagnostics), /SECRET_/);
+  assert.throws(() => consAppendDownloadDiagnostic(job, "RAW_ERROR"), /Неизвестный/);
+});
+
+test("download diagnostic history is capped, bucketed, and sanitized on read", () => {
+  const job = createJob();
+  consAppendDownloadDiagnostic(job, "DG_PENDING", 0, Date.UTC(2026, 6, 18, 10, 0, 0));
+  for (let index = 0; index < 34; index += 1) {
+    consAppendDownloadDiagnostic(
+      job,
+      "NM_TIMEOUT",
+      1,
+      Date.UTC(2026, 6, 18, 10, 0, index + 1)
+    );
+  }
+  job.downloadDiagnostics.push({
+    at: "not-a-date SECRET_TIME",
+    code: "RAW_SECRET_CODE",
+    countBucket: "SECRET_COUNT",
+    url: "https://example.test/SECRET_URL",
+  });
+
+  const safe = consSafeDownloadDiagnostics(job);
+  assert.equal(safe.length, 32);
+  assert.ok(safe.every((event) => event.code === "NM_TIMEOUT"));
+  assert.ok(safe.every((event) => event.countBucket === "1"));
+  assert.doesNotMatch(JSON.stringify(safe), /SECRET_/);
+  assert.deepEqual(Object.keys(safe[0]).sort(), ["at", "code", "countBucket"]);
+});
 
 function createJob() {
   return consCreateExportJob(

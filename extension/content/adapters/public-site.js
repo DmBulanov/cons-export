@@ -25,6 +25,16 @@
     return error;
   }
 
+  function resultSignature(items) {
+    const source = (items || []).map((item) => `${item.url}\n${item.title}`).join("\n---\n");
+    let hash = 2166136261;
+    for (let index = 0; index < source.length; index += 1) {
+      hash ^= source.charCodeAt(index);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
   const PublicSiteAdapter = {
     id: "public-site",
 
@@ -85,6 +95,30 @@
       return items;
     },
 
+    getSearchState(expectedQuery = "") {
+      const items = this.collectListItems();
+      const current = new URL(location.href);
+      const query = String(expectedQuery || "").replace(/\s+/g, " ").trim();
+      const currentQuery = String(current.searchParams.get("q") || "")
+        .replace(/\s+/g, " ")
+        .trim();
+      const emptyResults = /(?:ничего не найдено|документы не найдены)/i.test(
+        document.body?.innerText || ""
+      );
+      return {
+        queryMatches: Boolean(query) && currentQuery === query,
+        queryAuthoritative: Boolean(query) && currentQuery === query,
+        activeScope: "all",
+        loading: false,
+        emptyResults,
+        resultsReady:
+          current.pathname.startsWith("/search") && (items.length > 0 || emptyResults),
+        resultCount: items.length,
+        resultSignature: resultSignature(items),
+        items,
+      };
+    },
+
     /**
      * Public-site search: navigate to /search/?q=…
      */
@@ -96,32 +130,24 @@
         throw unsupportedScope(scope);
       }
 
-      const target = `https://www.consultant.ru/search/?q=${encodeURIComponent(q)}`;
-      const current = new URL(location.href);
-      const currentQuery = current.searchParams.get("q");
-      const isCurrentQuery =
-        current.pathname.startsWith("/search") && currentQuery != null && currentQuery.trim() === q;
-
-      if (!isCurrentQuery) {
-        location.assign(target);
-        // Navigation will unload this document; caller should wait/re-query.
+      const state = this.getSearchState(q);
+      if (!state.queryMatches || !state.resultsReady) {
         return {
           query: q,
           scope: "all",
-          scopeApplied: true,
+          scopeApplied: false,
           navigating: true,
-          url: target,
+          url: consBuildPublicSearchUrl(q),
           items: [],
           count: 0,
         };
       }
-      const items = this.collectListItems();
       return {
         query: q,
         scope: "all",
         scopeApplied: true,
-        items,
-        count: items.length,
+        items: state.items,
+        count: state.items.length,
         url: location.href,
       };
     },
