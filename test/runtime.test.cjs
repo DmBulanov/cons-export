@@ -164,9 +164,12 @@ test("format capabilities reject silent public-site fallback", () => {
 test("folder sanitization removes traversal, reserved names, and invalid characters", () => {
   assert.equal(consSanitizeFolder("../Практика/2026"), "Практика/2026");
   assert.equal(consSanitizeFolder("CON/дело:*"), "_CON/дело__");
-  assert.equal(consSanitizeFolder("../../"), "ConsDownload");
-  assert.equal(consMigrateStoredDownloadFolder("ConsExport", 0), "ConsDownload");
-  assert.equal(consMigrateStoredDownloadFolder("ConsExport", 1), "ConsExport");
+  assert.equal(consSanitizeFolder("../../"), "LexPack");
+  assert.equal(consMigrateStoredDownloadFolder("ConsExport", 0), "LexPack");
+  assert.equal(consMigrateStoredDownloadFolder("ConsDownload", 1), "LexPack");
+  assert.equal(consMigrateStoredDownloadFolder("ConsExport", 2), "ConsExport");
+  assert.equal(consMigrateStoredDownloadFolder("ConsDownload", 2), "ConsDownload");
+  assert.equal(consMigrateStoredDownloadFolder("Практика", 1), "Практика");
 });
 
 test("report URLs redact session-bearing parameters and fragments", () => {

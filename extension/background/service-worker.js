@@ -7,6 +7,7 @@ importScripts("search-flow.js");
 
 const JOB_STORAGE_KEY = "exportJob";
 const PROGRESS_STORAGE_KEY = "exportProgress";
+const SEARCH_COLLECTION_STORAGE_KEY = "searchCollection";
 const RESUME_ALARM = "cons-export-resume";
 const OFFSCREEN_PATH = "offscreen/sanitizer.html";
 const MAX_EXPORT_ITEMS = 200;
@@ -793,7 +794,7 @@ function reportFilename(job) {
     .replace(/[-:]/g, "")
     .replace(/\.\d{3}Z$/, "Z")
     .replace("T", "-");
-  return `ConsDownload-report-${stamp}.json`;
+  return `LexPack-report-${stamp}.json`;
 }
 
 function serializeJobReport(job) {
@@ -1104,6 +1105,56 @@ function normalizeItems(items, adapter, requestedLimit) {
   });
 }
 
+function normalizedCollectionQuery(value) {
+  return String(value || "").replace(/\s+/g, " ").trim().slice(0, 2000);
+}
+
+function normalizedCollectionCategory(value) {
+  const category = consNormalizeJudicialInstances([value])[0];
+  return category || "";
+}
+
+async function persistSearchCollection(options = {}) {
+  const adapter = CONS_ADAPTER_CAPABILITIES[options.adapter]
+    ? options.adapter
+    : "online-app";
+  const source = options.source === "search" ? "search" : "current-list";
+  const items = Array.isArray(options.items) && options.items.length
+    ? normalizeItems(options.items, adapter, MAX_EXPORT_ITEMS)
+    : [];
+  const total = Number(options.total);
+  const collection = {
+    version: 1,
+    status: "ready",
+    source,
+    tabId: Number.isInteger(options.tabId) ? options.tabId : null,
+    adapter,
+    query: normalizedCollectionQuery(options.query),
+    categoryKey: normalizedCollectionCategory(options.categoryKey),
+    scope: String(options.scope || "current-list").slice(0, 200),
+    items,
+    total: Number.isInteger(total) && total >= items.length ? total : items.length,
+    totalKnown: options.totalKnown === true,
+    truncated: options.truncated === true,
+    createdAt: new Date().toISOString(),
+  };
+  await chrome.storage.session.set({ [SEARCH_COLLECTION_STORAGE_KEY]: collection });
+  return collection;
+}
+
+async function readSearchCollection() {
+  const stored = await chrome.storage.session.get(SEARCH_COLLECTION_STORAGE_KEY);
+  return stored[SEARCH_COLLECTION_STORAGE_KEY] || null;
+}
+
+function searchCollectionMatches(collection, request = {}) {
+  if (!collection || collection.status !== "ready") return false;
+  if (!Number.isInteger(request.tabId) || collection.tabId !== request.tabId) return false;
+  if (request.adapter && collection.adapter !== request.adapter) return false;
+  if (collection.query !== normalizedCollectionQuery(request.query)) return false;
+  return collection.categoryKey === normalizedCollectionCategory(request.categoryKey);
+}
+
 async function startExportJob(options) {
   if (jobStartInProgress) throw new Error("Экспорт уже запускается");
   jobStartInProgress = true;
@@ -1407,13 +1458,10 @@ function searchItemIdentity(item) {
   }
 }
 
-async function collectJudicialInstances(tab, query, requestedInstances, requestedLimit) {
+async function collectJudicialInstances(tab, query, requestedInstances) {
   const instances = consNormalizeJudicialInstances(requestedInstances);
   if (!instances.length) throw new Error("Выберите хотя бы одну судебную инстанцию");
-  const parsedLimit = Number(requestedLimit);
-  const maxItems = Number.isInteger(parsedLimit)
-    ? Math.max(1, Math.min(MAX_EXPORT_ITEMS, parsedLimit))
-    : 50;
+  const maxItems = MAX_EXPORT_ITEMS;
   const collected = new Map();
   const breakdown = [];
   const unavailableInstances = [];
@@ -1566,8 +1614,7 @@ async function executeSearchFlow(message) {
     const collected = await collectJudicialInstances(
       fullTab,
       query,
-      message.instances || ["higher-courts", "arbitration-circuit"],
-      message.maxItems
+      message.instances || ["higher-courts", "arbitration-circuit"]
     );
     result = {
       adapter: "online-app",
@@ -1584,25 +1631,21 @@ async function executeSearchFlow(message) {
     result = await searchFlow.run({ tab, adapter: ping.adapter, query, scope });
   }
 
-  if (message.autoExport && result.items?.length) {
-    const started = await startExportJob({
-      adapter: result.adapter,
-      items: result.items,
-      format: message.format,
-      maxItems: message.maxItems,
-      query,
-      scope,
-    });
-    return {
-      ...result,
-      items: started.job.items,
-      count: started.job.items.length,
-      exportStarted: true,
-      truncated: Boolean(result.truncated || started.truncated),
-      jobId: started.job.id,
-    };
-  }
-  return { ...result, count: result.items?.length || 0 };
+  const count = result.items?.length || 0;
+  const categoryKey = result.breakdown?.at(-1)?.instance || "";
+  await persistSearchCollection({
+    source: "search",
+    tabId: result.fullResultsTabId || tab.id,
+    adapter: result.adapter,
+    query,
+    categoryKey,
+    scope,
+    items: result.items || [],
+    total: count,
+    totalKnown: result.adapter === "online-app" && result.truncated !== true,
+    truncated: result.truncated === true,
+  });
+  return { ...result, count };
 }
 
 async function runSearchFlow(message) {
@@ -1751,6 +1794,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return { ok: true, ...result };
       }
 
+      case "GET_SEARCH_COLLECTION": {
+        const collection = await readSearchCollection();
+        return {
+          ok: true,
+          cache: searchCollectionMatches(collection, message) ? collection : null,
+        };
+      }
+
+      case "CACHE_SEARCH_COLLECTION": {
+        const tab = Number.isInteger(message.tabId)
+          ? await chrome.tabs.get(message.tabId)
+          : null;
+        if (!tab?.url || !consIsConsultantPageUrl(tab.url)) {
+          return { ok: false, error: "Нельзя сохранить список с неподдерживаемой вкладки" };
+        }
+        const ping = await sendToTab(tab.id, { type: "PING" });
+        const expectedQuery = normalizedCollectionQuery(message.query);
+        const expectedCategory = normalizedCollectionCategory(message.categoryKey);
+        if (
+          !ping?.ok ||
+          ping.page !== "list" ||
+          ping.adapter !== message.adapter ||
+          normalizedCollectionQuery(ping.query) !== expectedQuery ||
+          normalizedCollectionCategory(ping.category?.key) !== expectedCategory
+        ) {
+          return { ok: false, error: "Страница уже показывает другую выдачу" };
+        }
+        const collection = await persistSearchCollection(message);
+        return { ok: true, cache: collection };
+      }
+
       case "GET_SETTINGS":
         return { ok: true, downloadFolder: await getDownloadFolder() };
 
@@ -1774,7 +1848,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           "lastInstances",
           "settingsSchemaVersion",
         ]);
-        await chrome.storage.session.remove([JOB_STORAGE_KEY, PROGRESS_STORAGE_KEY]);
+        await chrome.storage.session.remove([
+          JOB_STORAGE_KEY,
+          PROGRESS_STORAGE_KEY,
+          SEARCH_COLLECTION_STORAGE_KEY,
+        ]);
         return { ok: true };
 
       default:

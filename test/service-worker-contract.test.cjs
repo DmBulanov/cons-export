@@ -54,6 +54,52 @@ test("online practice continues through all results and selected court instances
   assert.match(source, /if \(ping\.adapter === "online-app"\)/);
 });
 
+test("search discovery always uses the hard 200-item cap, independent of download quantity", () => {
+  const collectBody = source.slice(
+    source.indexOf("async function collectJudicialInstances("),
+    source.indexOf("async function executeSearchFlow(")
+  );
+  const executeBody = source.slice(
+    source.indexOf("async function executeSearchFlow("),
+    source.indexOf("async function runSearchFlow(")
+  );
+
+  assert.match(source, /const MAX_EXPORT_ITEMS = 200/);
+  assert.match(
+    collectBody,
+    /async function collectJudicialInstances\(tab, query, requestedInstances\)/
+  );
+  assert.match(collectBody, /const maxItems = MAX_EXPORT_ITEMS/);
+  assert.match(
+    collectBody,
+    /type: "COLLECT_LIST",[\s\S]{0,120}allResults: true,[\s\S]{0,80}maxItems,/
+  );
+  assert.doesNotMatch(collectBody, /requestedLimit|message\.maxItems/);
+  assert.doesNotMatch(executeBody, /message\.maxItems/);
+  assert.match(
+    executeBody,
+    /collectJudicialInstances\(\s*fullTab,\s*query,\s*message\.instances \|\|/
+  );
+});
+
+test("search collections are persisted in session storage and exposed through scoped messages", () => {
+  assert.match(source, /const SEARCH_COLLECTION_STORAGE_KEY = "searchCollection"/);
+  assert.match(source, /async function persistSearchCollection\(options = \{\}\)/);
+  assert.match(
+    source,
+    /chrome\.storage\.session\.set\(\{ \[SEARCH_COLLECTION_STORAGE_KEY\]: collection \}\)/
+  );
+  assert.match(source, /async function readSearchCollection\(\)/);
+  assert.match(source, /function searchCollectionMatches\(collection, request = \{\}\)/);
+  assert.match(source, /case "GET_SEARCH_COLLECTION"/);
+  assert.match(source, /case "CACHE_SEARCH_COLLECTION"/);
+  assert.match(source, /await persistSearchCollection\(message\)/);
+  assert.match(
+    source,
+    /await persistSearchCollection\(\{[\s\S]{0,500}source: "search"[\s\S]{0,500}items: result\.items \|\| \[\]/
+  );
+});
+
 test("export waits for the document pane and native controls", () => {
   assert.match(source, /await waitDocumentReady\(tab\.id, job\.format, job\.id\)/);
   assert.match(source, /ping\.capabilities\.wordSaveReady \|\| ping\.capabilities\.menuSaveReady/);
@@ -109,7 +155,7 @@ test("stop requests are checked before tab extraction and while saving the repor
   );
 });
 
-test("local reset removes every extension setting and completed-job state", () => {
+test("local reset removes every extension setting, completed job, and cached collection", () => {
   const resetBody = source.slice(
     source.indexOf('case "CLEAR_LOCAL_DATA"'),
     source.indexOf("default:", source.indexOf('case "CLEAR_LOCAL_DATA"'))
@@ -126,7 +172,10 @@ test("local reset removes every extension setting and completed-job state", () =
   ]) {
     assert.match(resetBody, new RegExp(`"${key}"`));
   }
-  assert.match(resetBody, /chrome\.storage\.session\.remove\(\[JOB_STORAGE_KEY, PROGRESS_STORAGE_KEY\]\)/);
+  assert.match(
+    resetBody,
+    /chrome\.storage\.session\.remove\(\[[\s\S]{0,120}JOB_STORAGE_KEY,[\s\S]{0,80}PROGRESS_STORAGE_KEY,[\s\S]{0,80}SEARCH_COLLECTION_STORAGE_KEY,[\s\S]{0,40}\]\)/
+  );
 });
 
 test("all export item URLs cross the shared allowlist boundary", () => {

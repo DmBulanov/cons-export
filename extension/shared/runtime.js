@@ -1,8 +1,8 @@
 /** Shared runtime contracts for popup, content scripts, and the service worker. */
 (function () {
   const NATIVE_DOWNLOAD_MATCH_WINDOW_MS = 35000;
-  const CONS_DEFAULT_DOWNLOAD_FOLDER = "ConsDownload";
-  const CONS_SETTINGS_SCHEMA_VERSION = 1;
+  const CONS_DEFAULT_DOWNLOAD_FOLDER = "LexPack";
+  const CONS_SETTINGS_SCHEMA_VERSION = 2;
   const CONS_DOWNLOAD_DIAGNOSTIC_CODES = Object.freeze([
     "NM_CONTEXT",
     "NM_TIME",
@@ -230,7 +230,8 @@
 
   function consMigrateStoredDownloadFolder(rawFolder, schemaVersion = 0) {
     const folder = consSanitizeFolder(rawFolder);
-    return Number(schemaVersion || 0) < CONS_SETTINGS_SCHEMA_VERSION && folder === "ConsExport"
+    const legacyDefaults = new Set(["ConsExport", "ConsDownload"]);
+    return Number(schemaVersion || 0) < CONS_SETTINGS_SCHEMA_VERSION && legacyDefaults.has(folder)
       ? CONS_DEFAULT_DOWNLOAD_FOLDER
       : folder;
   }

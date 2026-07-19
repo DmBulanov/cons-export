@@ -62,7 +62,7 @@ function createJob() {
       id: "job-test",
       adapter: "online-app",
       format: "docx",
-      folder: "ConsDownload",
+      folder: "LexPack",
       query: "аренда",
       scope: "practice",
       items: [

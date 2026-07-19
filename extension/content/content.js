@@ -49,6 +49,14 @@
             page,
             capabilities,
             authRequired: page === "auth-required",
+            query:
+              capabilities.collectList && typeof adapter.currentSearchQuery === "function"
+                ? adapter.currentSearchQuery()
+                : "",
+            category:
+              capabilities.collectList && typeof adapter.currentResultCategory === "function"
+                ? adapter.currentResultCategory()
+                : { key: null, label: "" },
             documentTitle:
               capabilities.documentReady && typeof adapter.getDocumentTitle === "function"
                 ? adapter.getDocumentTitle()

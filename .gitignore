@@ -1,6 +1,6 @@
-# Cons Download
+# LexPack
 
-Chrome extension / Cons Download project files.
+Chrome extension / LexPack project files.
 
 # OS
 .DS_Store
@@ -26,4 +26,5 @@ dist/
 # Personal downloads accidentally copied here
 ConsExport/
 ConsDownload/
+LexPack/
 export_*.csv

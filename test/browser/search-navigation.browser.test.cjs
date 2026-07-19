@@ -221,16 +221,16 @@ test("online all-scope still opens full results and deduplicates selected instan
 
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`);
-  await popup.locator("#btnFind").waitFor();
+  await popup.locator("#searchSummary").waitFor();
+  await popup.locator("#searchSummary").click();
   await popup.locator("#query").fill(SEARCH_QUERY);
   await popup.locator("#scope").selectOption("all");
-  await popup.locator("#maxItems").fill("3");
   await popup.locator("#btnFind").click();
 
   try {
     await popup.waitForFunction(() => {
       const progress = document.querySelector("#progressText")?.textContent || "";
-      return /^найдено:\s*3\b/.test(progress);
+      return /^Найдено\s+4\b/.test(progress);
     }, undefined, { timeout: 15000 });
   } catch (error) {
     const state = await popup.evaluate(() => ({
@@ -259,8 +259,24 @@ test("online all-scope still opens full results and deduplicates selected instan
   const resultLog = await popup.locator("#log").textContent();
   assert.match(resultLog, /Определение Верховного Суда/);
   assert.match(resultLog, /Постановление окружного суда 1/);
-  assert.doesNotMatch(resultLog, /Постановление окружного суда 2/);
+  assert.match(resultLog, /Постановление окружного суда 2/);
   assert.doesNotMatch(resultLog, /НЕ СУДЕБНЫЙ|краткая практика|PRE-SCOPE/);
+  assert.equal(await popup.locator("#maxItems").inputValue(), "4");
+  assert.equal(await popup.locator("#maxItems").getAttribute("max"), "4");
+  assert.equal(await popup.locator("#btnExport").innerText(), "Скачать 4 документа");
+  assert.equal(await popup.locator("#searchPanel").getAttribute("open"), null);
+  assert.equal(await popup.locator("#searchSummary").innerText(), "Найти другую практику");
+  await popup.locator("#maxItems").fill("3");
+  assert.equal(await popup.locator("#btnExport").innerText(), "Скачать 3 документа");
+
+  await popup.reload();
+  await popup.waitForFunction(
+    () => document.querySelector("#btnExport")?.textContent?.includes("4 документа"),
+    undefined,
+    { timeout: 10000 }
+  );
+  assert.equal(await popup.locator("#maxItems").inputValue(), "4");
+  assert.match(await popup.locator("#log").innerText(), /Постановление окружного суда 2/);
 
   const searchRequests = requests.filter((entry) =>
     new URL(entry).searchParams.get("splusFind") === SEARCH_QUERY
@@ -298,6 +314,7 @@ test("manual collection harvests the whole virtualized category selected by the 
   });
   let [worker] = context.serviceWorkers();
   worker ||= await context.waitForEvent("serviceworker", { timeout: 15000 });
+  const extensionId = new URL(worker.url()).hostname;
   await context.route("https://online.consultant.ru/**", (route) =>
     route.fulfill({
       contentType: "text/html; charset=utf-8",
@@ -343,6 +360,32 @@ test("manual collection harvests the whole virtualized category selected by the 
   assert.equal(new Set(response.items.map((item) => item.url)).size, 65);
   assert.equal(await page.locator(".x-page-search-results__list").evaluate((node) => node.scrollTop), 0);
 
+  const popup = await context.newPage();
+  await popup.setViewportSize({ width: 390, height: 500 });
+  await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`);
+  await page.bringToFront();
+  await popup.reload();
+  await popup.waitForFunction(
+    () => document.querySelector("#maxItems")?.value === "65",
+    undefined,
+    { timeout: 15000 }
+  );
+  assert.equal(await popup.locator("#query").inputValue(), "");
+  assert.equal(await popup.locator("#query").isVisible(), false);
+  assert.equal(await popup.locator("#searchPanel").getAttribute("open"), null);
+  assert.equal(await popup.locator("#searchSummary").innerText(), "Найти другую практику");
+  assert.equal(await popup.locator("#resultTitle").innerText(), "Открытая подборка");
+  assert.equal(await popup.locator("#resultActions").isVisible(), true);
+  assert.equal(await popup.locator("#maxItems").getAttribute("max"), "65");
+  assert.equal(await popup.locator("#btnExport").innerText(), "Скачать 65 документов");
+  assert.equal(await popup.locator("#btnExport").isEnabled(), true);
+  const downloadButtonRect = await popup.locator("#btnExport").boundingBox();
+  assert.ok(downloadButtonRect, "download button must be rendered");
+  assert.ok(
+    downloadButtonRect.y + downloadButtonRect.height <= 500,
+    "manual download must be available in the first popup viewport"
+  );
+
   const limited = await collect(50);
   assert.equal(limited.ok, true);
   assert.equal(limited.count, 50);
@@ -351,4 +394,57 @@ test("manual collection harvests the whole virtualized category selected by the 
   assert.equal(limited.truncatedByLimit, true);
   assert.equal(limited.incomplete, false);
   assert.equal(await page.locator(".x-page-search-results__list").evaluate((node) => node.scrollTop), 0);
+});
+
+test("a non-judicial full-results category is explained instead of exported", async (t) => {
+  const userDataDir = await fs.mkdtemp(path.join(os.tmpdir(), "lexpack-non-judicial-"));
+  let context;
+  t.after(async () => {
+    await context?.close();
+    await fs.rm(userDataDir, { recursive: true, force: true });
+  });
+
+  context = await chromium.launchPersistentContext(userDataDir, {
+    channel: "chromium",
+    headless: true,
+    args: [
+      `--disable-extensions-except=${extensionPath}`,
+      `--load-extension=${extensionPath}`,
+    ],
+  });
+  let [worker] = context.serviceWorkers();
+  worker ||= await context.waitForEvent("serviceworker", { timeout: 15000 });
+  const extensionId = new URL(worker.url()).hostname;
+  await context.route("https://online.consultant.ru/**", (route) =>
+    route.fulfill({
+      contentType: "text/html; charset=utf-8",
+      body: fullResultsPageHtml(SEARCH_QUERY),
+    })
+  );
+
+  const page = await context.newPage();
+  await page.goto(FULL_RESULTS_URL);
+  await page.locator(".x-page-search-results__list").waitFor();
+  const popup = await context.newPage();
+  await popup.setViewportSize({ width: 390, height: 500 });
+  await popup.goto(`chrome-extension://${extensionId}/popup/popup.html`);
+  await page.bringToFront();
+  await popup.reload();
+  await popup.waitForFunction(
+    () => document.querySelector("#foundSummary")?.textContent?.includes("Выберите слева"),
+    undefined,
+    { timeout: 10000 }
+  );
+
+  assert.equal(await popup.locator("#resultTitle").innerText(), "Открытая подборка");
+  assert.match(
+    await popup.locator("#foundSummary").innerText(),
+    /Российское законодательство[\s\S]*Выберите слева судебную категорию/
+  );
+  assert.equal(await popup.locator("#btnExport").isVisible(), false);
+  assert.doesNotMatch(await popup.locator("#log").innerText(), /НЕ СУДЕБНЫЙ/);
+  const cached = await worker.evaluate(async () =>
+    (await chrome.storage.session.get("searchCollection")).searchCollection
+  );
+  assert.equal(cached, undefined);
 });

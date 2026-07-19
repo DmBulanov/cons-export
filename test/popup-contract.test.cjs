@@ -44,21 +44,27 @@ test("popup exposes instance selection and full collection of the user-selected 
     assert.match(html, new RegExp(`name="instance" value="${value}"`));
   }
   assert.doesNotMatch(html, /Обновить список/);
-  assert.match(source, /if \(ping\.page === "list"\) await scanList\(\)/);
+  assert.match(source, /if \(ping\.capabilities\?\.collectList\)/);
+  assert.match(source, /await prepareOpenCollection\(ping\)/);
   assert.match(source, /instances: selectedInstances\(\)/);
-  assert.match(source, /type: "COLLECT_LIST",[\s\S]{0,120}allResults: true/);
+  assert.match(
+    source,
+    /type: "COLLECT_LIST",[\s\S]{0,120}allResults: true,[\s\S]{0,80}maxItems: 200/
+  );
   assert.match(source, /lastInstances/);
   assert.match(source, /response\.categoryTotalKnown/);
   assert.match(source, /response\.truncatedByLimit/);
   assert.match(source, /собрано \$\{response\.count\} из/);
-  assert.match(source, /response\.truncated \? " \(достигнут лимит\)"/);
+  assert.match(source, /if \(meta\.truncated\)[\s\S]{0,140}\$\{found\} не менее/);
   assert.doesNotMatch(source, /type: "COLLECT_LIST",[\s\S]{0,160}prevalidated: true/);
 });
 
-test("popup explains the 200-item limit, remembered query, report, and exceptional downloads", () => {
-  assert.match(html, /id="limitInfo"[\s\S]*От 1 до 200 документов за одну задачу/i);
-  assert.match(html, /id="rememberInfo"[\s\S]*только в этом[\s\S]*профиле Chrome/i);
-  assert.match(html, /Запомнить запрос/);
+test("popup explains the result-sized quantity, report, and exceptional downloads", () => {
+  assert.match(
+    html,
+    /id="limitInfo"[\s\S]*автоматически выбраны все найденные документы[\s\S]*не\s+более 200/i
+  );
+  assert.doesNotMatch(html, /rememberQuery|rememberInfo|Запомнить запрос/);
   assert.match(html, /JSON — текстовый файл, его можно открыть в Блокноте/);
   assert.match(source, /unconfirmed = 0/);
   assert.match(source, /if \(unconfirmed > 0\)/);
@@ -72,7 +78,6 @@ test("every explanatory hint is an accessible on-demand info popover", () => {
     "searchInfo",
     "scopeInfo",
     "limitInfo",
-    "rememberInfo",
     "formatInfo",
     "folderInfo",
     "progressInfo",
@@ -105,8 +110,11 @@ test("every explanatory hint is an accessible on-demand info popover", () => {
 
 test("popup uses concise user-facing actions and keeps support tools collapsed", () => {
   assert.match(html, />Найти<\/button>/);
-  assert.match(html, /Найти и скачать/);
-  assert.match(html, /Скачать результаты/);
+  assert.doesNotMatch(html, /Найти и скачать/);
+  assert.doesNotMatch(html, /id="btnFindSave"/);
+  assert.doesNotMatch(source, /btnFindSave|autoExport/);
+  assert.match(source, /btnFind\.addEventListener\("click", \(\) => runFind\(\)\)/);
+  assert.match(source, /`Скачать \$\{selected\} \$\{documentWord\(selected\)\}`/);
   assert.match(html, /Скачать открытый документ/);
   assert.match(html, /<summary>Помощь при ошибке<\/summary>/);
   assert.match(html, /Скопировать диагностику/);
@@ -123,11 +131,108 @@ test("popup uses concise user-facing actions and keeps support tools collapsed",
   assert.match(source, /const defaultFormat =/);
   assert.match(source, /Скачанные файлы и вход не изменятся/);
   assert.doesNotMatch(source, /btnScan/);
-  assert.match(source, /const listPage = currentPage === "list"/);
-  assert.doesNotMatch(source, /!cachedItems\.length \|\| !formatSupported/);
-  assert.match(source, /btnOne\.hidden = !documentPage/);
   assert.match(
     source,
-    /query\.addEventListener\("change"[\s\S]{0,120}rememberQuery\.checked[\s\S]{0,80}storeSettings/
+    /const hasDownloadableCollection =\s*collectionStatus === "ready" && collectionReady && cachedItems\.length > 0/
   );
+  assert.match(source, /els\.resultActions\.hidden = collectionStatus === "idle"/);
+  assert.match(source, /collectList: pageCapabilities\.collectList === true/);
+  assert.match(source, /btnOne\.hidden = !documentPage/);
+  assert.doesNotMatch(source, /els\.rememberQuery|rememberQuery\.checked/);
+});
+
+test("result quantity is hidden until collection and defaults to the collected count", () => {
+  assert.match(
+    html,
+    /<section id="resultActions" class="block result-actions" hidden>/
+  );
+  assert.match(html, /<label class="label" for="maxItems">Количество документов<\/label>/);
+  assert.match(source, /const available = Math\.min\(200, cachedItems\.length\)/);
+  assert.match(source, /els\.maxItems\.max = String\(Math\.max\(1, available\)\)/);
+  assert.match(
+    source,
+    /els\.maxItems\.value = String\(Math\.max\(1, cachedItems\.length\)\)/
+  );
+  assert.match(source, /els\.maxItems\.addEventListener\("input"/);
+  assert.match(source, /els\.maxItems\.addEventListener\("change"/);
+  assert.ok(
+    html.indexOf('id="resultActions"') < html.indexOf('class="block search-block"'),
+    "the already-open collection must appear before the new-search form"
+  );
+});
+
+test("manual judicial results remain independent from the optional new-search form", () => {
+  assert.match(source, /function manualCategoryIsSupported\(category\)/);
+  assert.match(source, /CONS_JUDICIAL_INSTANCES\.includes/);
+  assert.match(source, /Выберите слева судебную категорию, которую нужно скачать/);
+  assert.match(source, /source: "current-list"/);
+  assert.match(
+    source,
+    /function invalidateSearchCollection\(\) \{\s*if \(collectionSource === "search"\)/
+  );
+  assert.match(source, /collectionStatus !== "error"/);
+  assert.match(source, /Повторить чтение/);
+});
+
+test("new-search controls use a closed native disclosure", () => {
+  assert.match(
+    html,
+    /<details id="searchPanel" class="block search-block">\s*<summary id="searchSummary">Найти практику<\/summary>/
+  );
+  assert.doesNotMatch(
+    html,
+    /<details id="searchPanel" class="block search-block"\s+open/
+  );
+  assert.ok(
+    html.indexOf('id="searchPanel"') < html.indexOf('id="query"'),
+    "all new-search controls must be inside the disclosure"
+  );
+  assert.match(source, /collectionStatus === "idle"[\s\S]{0,100}"Найти практику"/);
+  assert.match(source, /"Найти другую практику"/);
+  assert.match(source, /els\.searchPanel\.open = false/);
+});
+
+test("document quantity is not persisted as a local preference", () => {
+  const storeSettingsBody = source.slice(
+    source.indexOf("async function storeSettings()"),
+    source.indexOf("async function init()")
+  );
+  const initReadStart = source.indexOf("const stored = await chrome.storage.local.get([");
+  const initSettingsRead = source.slice(
+    initReadStart,
+    source.indexOf("]);", initReadStart) + 3
+  );
+  assert.doesNotMatch(storeSettingsBody, /maxItems/);
+  assert.doesNotMatch(initSettingsRead, /"maxItems"/);
+  assert.match(
+    source,
+    /await chrome\.storage\.local\.remove\(\["lastQuery", "rememberQuery", "maxItems"\]\)/
+  );
+});
+
+test("search text is never persisted and legacy saved-query keys are removed", () => {
+  const storeSettingsBody = source.slice(
+    source.indexOf("async function storeSettings()"),
+    source.indexOf("async function init()")
+  );
+  const initReadStart = source.indexOf("const stored = await chrome.storage.local.get([");
+  const initSettingsRead = source.slice(
+    initReadStart,
+    source.indexOf("]);", initReadStart) + 3
+  );
+  assert.doesNotMatch(html, /rememberQuery|rememberInfo|Запомнить запрос/);
+  assert.doesNotMatch(storeSettingsBody, /lastQuery|rememberQuery/);
+  assert.doesNotMatch(initSettingsRead, /"lastQuery"|"rememberQuery"/);
+  assert.match(
+    source,
+    /chrome\.storage\.local\.remove\(\["lastQuery", "rememberQuery", "maxItems"\]\)/
+  );
+});
+
+test("popup caches and restores the current collection through session-backed messages", () => {
+  assert.match(source, /type: "CACHE_SEARCH_COLLECTION"/);
+  assert.match(source, /type: "GET_SEARCH_COLLECTION"/);
+  assert.match(source, /async function restoreCollection\(ping\)/);
+  assert.match(source, /cache\?\.status !== "ready"/);
+  assert.match(source, /applyItems\(cache\.items \|\| \[\]/);
 });

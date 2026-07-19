@@ -49,6 +49,11 @@ body {
   margin-bottom: 10px;
 }
 
+.block[hidden],
+.actions[hidden] {
+  display: none;
+}
+
 .label {
   display: block;
   font-size: 11px;
@@ -152,6 +157,37 @@ input {
   align-items: center;
 }
 
+.search-block > summary {
+  display: flex;
+  align-items: center;
+  min-height: 32px;
+  list-style: none;
+  cursor: pointer;
+  font-weight: 700;
+}
+
+.search-block > summary::-webkit-details-marker {
+  display: none;
+}
+
+.search-block > summary::after {
+  content: "›";
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 18px;
+  line-height: 1;
+  transform: rotate(90deg);
+  transition: transform 120ms ease;
+}
+
+.search-block[open] > summary::after {
+  transform: rotate(-90deg);
+}
+
+.search-block[open] > summary {
+  margin-bottom: 10px;
+}
+
 .search-block textarea {
   width: 100%;
   resize: vertical;
@@ -219,13 +255,13 @@ input {
 
 .search-actions {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
   margin-top: 10px;
 }
 
 .search-actions .btn.primary {
-  grid-column: auto;
+  grid-column: 1;
 }
 
 #downloadFolder {
@@ -237,16 +273,7 @@ input {
   background: #fff;
 }
 
-.field-row {
-  display: grid;
-  grid-template-columns: 1.15fr 1.2fr;
-  gap: 10px;
-  align-items: end;
-  margin-top: 9px;
-}
-
-.compact-field,
-.check-field {
+.compact-field {
   color: var(--muted);
   font-size: 11px;
 }
@@ -256,22 +283,31 @@ input {
   padding: 6px 8px;
 }
 
-.check-field {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-  min-height: 32px;
+.result-actions .result-title {
+  font-size: 14px;
+  font-weight: 700;
+  margin-bottom: 3px;
 }
 
-.check-field input {
-  width: auto;
+.result-actions .result-summary {
+  min-height: 18px;
+  margin: 0 0 8px;
+  color: var(--muted);
+  font-size: 12px;
 }
 
-.remember-field {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 5px;
-  align-items: center;
+#resultQuantity[hidden],
+#btnExport[hidden] {
+  display: none;
+}
+
+.result-actions #resultQuantity,
+.result-actions #maxItems {
+  margin-bottom: 8px;
+}
+
+.result-actions .btn {
+  width: 100%;
 }
 
 .btn:focus-visible,
